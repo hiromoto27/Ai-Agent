@@ -9,7 +9,7 @@ def test_run_command_allowed_and_captures_output(permissive_context):
 
 
 def test_run_command_nonzero_exit_reported(permissive_context):
-    result = RunCommandSkill().run(permissive_context, command="python3 -c \"import sys; sys.exit(3)\"")
+    result = RunCommandSkill().run(permissive_context, command="python -c \"import sys; sys.exit(3)\"")
     assert not result.ok
     assert result.data["exit_code"] == 3
 
@@ -28,7 +28,7 @@ def test_run_command_missing_binary(permissive_context):
 
 def test_run_command_timeout(permissive_context):
     result = RunCommandSkill().run(
-        permissive_context, command="python3 -c \"import time; time.sleep(5)\"", timeout_sec=1
+        permissive_context, command="python -c \"import time; time.sleep(5)\"", timeout_sec=1
     )
     assert not result.ok
     assert "таймаут" in result.error

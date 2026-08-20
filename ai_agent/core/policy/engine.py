@@ -45,7 +45,6 @@ class PolicyConfig:
         default_factory=lambda: [
             "**/.ssh/**",
             "**/.aws/**",
-            "**/AppData/**",
             "**/*.pem",
             "**/*.key",
         ]

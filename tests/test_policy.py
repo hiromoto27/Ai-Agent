@@ -49,6 +49,24 @@ def test_deny_pattern_always_blocks_even_inside_workspace(tmp_path):
         engine.enforce("files.read", path=secret)
 
 
+def test_workspace_under_windows_appdata_temp_is_not_denied(tmp_path):
+    """Регрессия: на Windows pytest (и многие приложения) кладут временные/
+    рабочие каталоги под %LOCALAPPDATA%\\Temp, т.е. путь буквально содержит
+    "AppData". Старый deny-паттерн "**/AppData/**" ошибочно блокировал
+    запись даже в собственный workspace агента. Актуальный deny-список
+    (.ssh/.aws/*.pem/*.key) не должен трогать такие пути."""
+    windows_like_root = tmp_path / "Users" / "runneradmin" / "AppData" / "Local" / "Temp" / "workspace"
+    windows_like_root.mkdir(parents=True)
+    config = PolicyConfig.default()
+    engine = PolicyEngine(
+        config,
+        workspace_root=windows_like_root,
+        confirm_callback=always_deny,
+        audit_log_path=tmp_path / "audit.jsonl",
+    )
+    engine.enforce("files.write", path=windows_like_root / "notes.txt")
+
+
 def test_shell_disabled_by_default(tmp_path):
     engine, _ = make_engine(tmp_path)
     with pytest.raises(PermissionDenied):

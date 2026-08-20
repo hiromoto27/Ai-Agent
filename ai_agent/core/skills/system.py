@@ -35,7 +35,13 @@ class RunCommandSkill(Skill):
         timeout = min(timeout, context.profile.max_script_timeout_sec * 4)
 
         try:
-            args = shlex.split(command, posix=not _is_windows())
+            # posix=True всегда, даже на Windows: это про синтаксис разбора
+            # строки (корректная обработка кавычек вокруг аргументов типа
+            # `-c "..."`), а не про целевую ОС. posix=False на Windows
+            # сохраняет кавычки как часть токена и молча ломает такие
+            # команды (см. историю коммитов) — posix=True работает
+            # одинаково правильно на всех платформах.
+            args = shlex.split(command, posix=True)
         except ValueError as e:
             return SkillResult(ok=False, error=f"не удалось разобрать команду: {e}")
         if not args:
@@ -66,12 +72,6 @@ class RunCommandSkill(Skill):
             error="" if result.returncode == 0 else f"команда завершилась с кодом {result.returncode}",
             data={"exit_code": result.returncode, "stdout": stdout, "stderr": stderr},
         )
-
-
-def _is_windows() -> bool:
-    import platform
-
-    return platform.system() == "Windows"
 
 
 def register_system_skills(registry) -> None:

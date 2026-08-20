@@ -14,7 +14,6 @@ filesystem:
   deny:             # эти пути запрещены всегда, даже внутри workspace
     - "**/.ssh/**"
     - "**/.aws/**"
-    - "**/AppData/**"
     - "**/*.pem"
     - "**/*.key"
 
