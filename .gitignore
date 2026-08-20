@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Пользовательские данные агента (память, конфиги, аудит-лог) — не для репозитория
+.ai-agent/
+AiAgentWorkspace/
+data/
+*.sqlite3
+audit.jsonl
