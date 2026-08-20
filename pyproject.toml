@@ -18,6 +18,7 @@ all = ["ai-agent[llm,docs,web,gui,dev]"]
 
 [project.scripts]
 ai-agent = "ai_agent.cli:main"
+ai-agent-gui = "ai_agent.ui.app:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
