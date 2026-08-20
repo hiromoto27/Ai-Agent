@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from pathlib import Path
 
 from ai_agent.core.autotune import ensure_settings
@@ -29,7 +30,18 @@ _PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _default_policy_source() -> Path:
-    return _PACKAGE_ROOT / "config" / "policy.default.yaml"
+    """Путь к шаблону политики по умолчанию.
+
+    В обычном запуске (из исходников) это ``<repo>/config``. Под
+    PyInstaller (frozen .exe) PyInstaller распаковывает файлы из ``datas``
+    во временную/бандл-директорию ``sys._MEIPASS`` — см. packaging/build.spec,
+    где ``config/policy.default.yaml`` включён с тем же относительным путём.
+    """
+    if getattr(sys, "frozen", False):
+        base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    else:
+        base = _PACKAGE_ROOT
+    return base / "config" / "policy.default.yaml"
 
 
 def ensure_state_dirs(state_dir: Path, workspace_root: Path) -> None:
