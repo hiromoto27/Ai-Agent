@@ -6,6 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -43,9 +44,11 @@ class MainWindow(QMainWindow):
         if workspace_root is not None:
             kwargs["workspace_root"] = workspace_root
         self.agent = build_agent(confirm_callback=self.confirm_bridge.confirm_callback, **kwargs)
+        self._policy_path = self.agent.skill_context.policy.audit_log_path.parent / "policy.yaml"
 
         self._worker: AgentWorker | None = None
         self._model_workers: list[SkillWorker] = []
+        self._models_busy_count = 0
         self._build_ui()
 
     # ---- построение интерфейса --------------------------------------------------
@@ -103,7 +106,6 @@ class MainWindow(QMainWindow):
         view = QTextEdit()
         view.setReadOnly(True)
         config = self.agent.skill_context.policy.config
-        policy_path = self.agent.skill_context.policy.audit_log_path.parent / "policy.yaml"
         view.setPlainText(
             "Текущая политика прав доступа (config/policy.yaml):\n\n"
             f"shell.enabled: {config.shell_enabled}\n"
@@ -112,7 +114,7 @@ class MainWindow(QMainWindow):
             f"model_download.enabled: {config.model_download_enabled}\n"
             f"workspace_only: {config.workspace_only}\n"
             f"network.enabled: {config.network_enabled}\n\n"
-            f"Файл: {policy_path}\n"
+            f"Файл: {self._policy_path}\n"
             "Отредактируйте его и перезапустите приложение, чтобы изменить права.\n"
             "Действия, требующие подтверждения, покажут диалог во время выполнения задачи."
         )
@@ -127,6 +129,11 @@ class MainWindow(QMainWindow):
         self.hw_summary_label.setObjectName("hwSummary")
         self.hw_summary_label.setWordWrap(True)
         layout.addWidget(self.hw_summary_label)
+
+        self.enable_download_checkbox = QCheckBox("Разрешить скачивание моделей с Hugging Face")
+        self.enable_download_checkbox.setChecked(self.agent.skill_context.policy.config.model_download_enabled)
+        self.enable_download_checkbox.toggled.connect(self._on_toggle_model_download)
+        layout.addWidget(self.enable_download_checkbox)
 
         recommend_header = QHBoxLayout()
         recommend_header.addWidget(QLabel("Рекомендации под ваш ПК:"))
@@ -166,12 +173,25 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(self.download_search_button)
 
+        local_header = QHBoxLayout()
+        local_header.addWidget(QLabel("Локальные модели (workspace/models — можно закинуть файлы вручную):"))
+        local_header.addStretch()
+        self.refresh_local_button = QPushButton("🔄 Обновить")
+        self.refresh_local_button.setObjectName("secondary")
+        self.refresh_local_button.clicked.connect(self._on_list_local_models)
+        local_header.addWidget(self.refresh_local_button)
+        layout.addLayout(local_header)
+
+        self.local_models_list = QListWidget()
+        layout.addWidget(self.local_models_list, 1)
+
         self.model_status_label = QLabel("")
         self.model_status_label.setObjectName("statusLabel")
         self.model_status_label.setWordWrap(True)
         layout.addWidget(self.model_status_label)
 
         self._on_recommend_models()
+        self._on_list_local_models()
         return widget
 
     # ---- обработчики: чат ----------------------------------------------------------
@@ -216,13 +236,40 @@ class MainWindow(QMainWindow):
             lines.append(f"- [{status}] {episode.task}")
         self.memory_view.setPlainText("\n".join(lines))
 
-    # ---- обработчики: модели (Hugging Face) -----------------------------------------
+    # ---- обработчики: модели (Hugging Face + локальные) ------------------------------
+
+    def _on_toggle_model_download(self, checked: bool) -> None:
+        self.agent.skill_context.policy.config.model_download_enabled = checked
+        self.agent.skill_context.policy.config.save(self._policy_path)
+        state = "включено" if checked else "выключено"
+        self.model_status_label.setText(
+            f"Скачивание моделей с Hugging Face {state} (сохранено в policy.yaml). "
+            "Каждое скачивание всё равно попросит отдельное подтверждение."
+        )
 
     def _run_model_skill(self, name: str, kwargs: dict, on_done) -> None:
+        """Запускает навык в фоне. Несколько таких вызовов могут идти
+        параллельно (например при открытии вкладки), поэтому кнопки
+        разблокируются по счётчику, а не по последнему завершившемуся."""
+        self._models_busy_count += 1
         self._set_models_busy(True)
+
         worker = SkillWorker(self.agent.skills, self.agent.skill_context, name, kwargs, parent=self)
-        worker.finished_skill.connect(on_done)
-        worker.failed.connect(self._on_models_failed)
+
+        def _on_finished_skill(result: SkillResult) -> None:
+            self._models_busy_count = max(0, self._models_busy_count - 1)
+            if self._models_busy_count == 0:
+                self._set_models_busy(False)
+            on_done(result)
+
+        def _on_failed(message: str) -> None:
+            self._models_busy_count = max(0, self._models_busy_count - 1)
+            if self._models_busy_count == 0:
+                self._set_models_busy(False)
+            self.model_status_label.setText(f"Ошибка: {message}")
+
+        worker.finished_skill.connect(_on_finished_skill)
+        worker.failed.connect(_on_failed)
         # Держим ссылку, пока поток жив, иначе Python может собрать объект раньше времени.
         self._model_workers.append(worker)
         worker.finished.connect(lambda: self._model_workers.remove(worker) if worker in self._model_workers else None)
@@ -233,7 +280,6 @@ class MainWindow(QMainWindow):
         self._run_model_skill("models.recommend", {}, self._on_recommend_finished)
 
     def _on_recommend_finished(self, result: SkillResult) -> None:
-        self._set_models_busy(False)
         if not result.ok:
             self.model_status_label.setText(f"Ошибка: {result.error}")
             return
@@ -261,7 +307,6 @@ class MainWindow(QMainWindow):
         self._run_model_skill("models.search_huggingface", {"query": query}, self._on_search_finished)
 
     def _on_search_finished(self, result: SkillResult) -> None:
-        self._set_models_busy(False)
         if not result.ok:
             self.model_status_label.setText(f"Ошибка поиска: {result.error}")
             return
@@ -277,6 +322,12 @@ class MainWindow(QMainWindow):
         if item is None:
             self.model_status_label.setText("Сначала выберите модель в списке.")
             return
+        if not self.enable_download_checkbox.isChecked():
+            self.model_status_label.setText(
+                "Скачивание моделей выключено — включите галочку "
+                "«Разрешить скачивание моделей с Hugging Face» выше."
+            )
+            return
         repo_id = item.data(Qt.UserRole)
         self.model_status_label.setText(
             f"Скачиваю {repo_id}… может занять время и потребует подтверждения."
@@ -284,15 +335,23 @@ class MainWindow(QMainWindow):
         self._run_model_skill("models.download_huggingface", {"repo_id": repo_id}, self._on_download_finished)
 
     def _on_download_finished(self, result: SkillResult) -> None:
-        self._set_models_busy(False)
         if not result.ok:
             self.model_status_label.setText(f"Ошибка скачивания: {result.error}")
             return
         self.model_status_label.setText(result.output)
+        self._on_list_local_models()  # скачанное сразу появится в разделе локальных моделей
 
-    def _on_models_failed(self, message: str) -> None:
-        self._set_models_busy(False)
-        self.model_status_label.setText(f"Ошибка: {message}")
+    def _on_list_local_models(self) -> None:
+        self._run_model_skill("models.list_local", {}, self._on_list_local_finished)
+
+    def _on_list_local_finished(self, result: SkillResult) -> None:
+        if not result.ok:
+            self.model_status_label.setText(f"Ошибка: {result.error}")
+            return
+        self.local_models_list.clear()
+        for m in result.data["models"]:
+            icon = "📁" if m["is_dir"] else "📄"
+            self.local_models_list.addItem(f"{icon} {m['name']} — ~{m['size_gb']} ГБ")
 
     def _set_models_busy(self, busy: bool) -> None:
         for w in (
@@ -300,6 +359,7 @@ class MainWindow(QMainWindow):
             self.search_button,
             self.download_recommend_button,
             self.download_search_button,
+            self.refresh_local_button,
             self.model_search_input,
         ):
             w.setEnabled(not busy)

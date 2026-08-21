@@ -11,6 +11,7 @@ core.autotune). ``models.search_huggingface`` ищет модели на Hub.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 from ai_agent.core.autotune import detect_hardware
@@ -19,6 +20,17 @@ from ai_agent.core.hf_models import DownloadFn, HFApiClient, download_model, rec
 from .base import Skill, SkillContext, SkillParam, SkillResult, SkillSpec
 
 MODELS_SUBDIR = "models"
+_IGNORED_ENTRIES = {"README.txt"}
+
+
+def _entry_size_bytes(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
+    total = 0
+    for child in path.rglob("*"):
+        if child.is_file():
+            total += child.stat().st_size
+    return total
 
 
 class RecommendModelsSkill(Skill):
@@ -143,7 +155,44 @@ class DownloadHuggingFaceModelSkill(Skill):
         )
 
 
+class ListLocalModelsSkill(Skill):
+    spec = SkillSpec(
+        name="models.list_local",
+        description=(
+            "Показать модели, уже лежащие локально в workspace/models — скачанные через "
+            "models.download_huggingface или добавленные вручную (пользователь может просто "
+            "скопировать туда файлы моделей из другого источника)."
+        ),
+        parameters=[],
+    )
+
+    def _run(self, context: SkillContext) -> SkillResult:
+        target_dir = context.resolve_path(".", subdir=MODELS_SUBDIR)
+        if not target_dir.exists():
+            return SkillResult(ok=True, output="Папка models пуста.", data={"models": []})
+
+        entries = []
+        for p in sorted(target_dir.iterdir()):
+            if p.name in _IGNORED_ENTRIES:
+                continue
+            size_gb = round(_entry_size_bytes(p) / (1024**3), 3)
+            entries.append({"name": p.name, "is_dir": p.is_dir(), "size_gb": size_gb})
+
+        if not entries:
+            return SkillResult(ok=True, output="Папка models пуста.", data={"models": [], "path": str(target_dir)})
+
+        lines = [
+            f"- {e['name']} ({'папка' if e['is_dir'] else 'файл'}, ~{e['size_gb']} ГБ)" for e in entries
+        ]
+        return SkillResult(
+            ok=True,
+            output="\n".join(lines),
+            data={"models": entries, "path": str(target_dir)},
+        )
+
+
 def register_model_skills(registry) -> None:
     registry.register(RecommendModelsSkill())
     registry.register(SearchHuggingFaceSkill())
     registry.register(DownloadHuggingFaceModelSkill())
+    registry.register(ListLocalModelsSkill())

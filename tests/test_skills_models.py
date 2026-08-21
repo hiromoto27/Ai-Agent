@@ -2,6 +2,7 @@ from pathlib import Path
 
 from ai_agent.core.skills.models import (
     DownloadHuggingFaceModelSkill,
+    ListLocalModelsSkill,
     RecommendModelsSkill,
     SearchHuggingFaceSkill,
 )
@@ -68,3 +69,36 @@ def test_download_huggingface_allowed_with_permissive_context(permissive_context
     assert Path(result.data["path"]) == expected_dir
     assert expected_dir.exists()
     assert calls[0]["repo_id"] == "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+
+
+def test_list_local_models_empty_when_no_folder(locked_context):
+    result = ListLocalModelsSkill().run(locked_context)
+    assert result.ok
+    assert result.data["models"] == []
+
+
+def test_list_local_models_needs_no_permissions(locked_context, workspace: Path):
+    """Как и рекомендации — чтение workspace/models работает даже при
+    запертой политике: это своя же песочница, не внешний путь."""
+    models_dir = workspace / "models"
+    models_dir.mkdir()
+    (models_dir / "manual.gguf").write_bytes(b"x" * 1024)
+    (models_dir / "README.txt").write_text("подсказка, должна игнорироваться")
+
+    result = ListLocalModelsSkill().run(locked_context)
+    assert result.ok
+    names = [m["name"] for m in result.data["models"]]
+    assert names == ["manual.gguf"]
+    assert result.data["models"][0]["is_dir"] is False
+
+
+def test_list_local_models_lists_downloaded_repo_folder(permissive_context, workspace: Path):
+    models_dir = workspace / "models" / "Qwen__Qwen2.5-1.5B-Instruct-GGUF"
+    models_dir.mkdir(parents=True)
+    (models_dir / "model.gguf").write_bytes(b"x" * 2048)
+
+    result = ListLocalModelsSkill().run(permissive_context)
+    assert result.ok
+    assert result.data["models"] == [
+        {"name": "Qwen__Qwen2.5-1.5B-Instruct-GGUF", "is_dir": True, "size_gb": round(2048 / 1024**3, 3)}
+    ]

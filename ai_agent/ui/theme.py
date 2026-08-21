@@ -125,6 +125,24 @@ QPushButton#secondary:hover {{
     background-color: {BORDER};
 }}
 
+QCheckBox {{
+    spacing: 8px;
+    padding: 4px 0;
+}}
+
+QCheckBox::indicator {{
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    border: 1px solid {BORDER};
+    background-color: {BG_INPUT};
+}}
+
+QCheckBox::indicator:checked {{
+    background-color: {ACCENT};
+    border: 1px solid {ACCENT};
+}}
+
 QLabel#hwSummary {{
     background-color: {BG_PANEL};
     border: 1px solid {BORDER};

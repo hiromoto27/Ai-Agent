@@ -15,7 +15,24 @@ PyInstaller не кросс-компилирует — сборку нужно �
 
 from pathlib import Path
 
+from PyInstaller.utils.hooks import copy_metadata
+
 REPO_ROOT = Path(SPECPATH).resolve().parent
+
+# huggingface_hub (и часть его зависимостей) читает своё же package-метаданные
+# через importlib.metadata в рантайме (версия для user-agent заголовка и
+# т.п.). PyInstaller по умолчанию тянет только .py-код через hiddenimports,
+# а .dist-info с метаданными — нет, из-за чего такие вызовы в frozen-сборке
+# либо тихо деградируют, либо (в других версиях/местах, не гарантировано)
+# падают с PackageNotFoundError. copy_metadata — стандартный fix для этого
+# класса пакетов, дешёвая подстраховка независимо от того, воспроизвели мы
+# конкретный сбой локально или нет.
+hf_metadata = []
+for _pkg in ("huggingface_hub", "requests", "filelock", "packaging", "tqdm", "pyyaml", "fsspec"):
+    try:
+        hf_metadata += copy_metadata(_pkg)
+    except Exception:
+        pass  # пакета может не быть в окружении сборки — пропускаем, не критично
 
 a = Analysis(
     [str(REPO_ROOT / "packaging" / "entrypoint.py")],
@@ -23,6 +40,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (str(REPO_ROOT / "config" / "policy.default.yaml"), "config"),
+        *hf_metadata,
     ],
     hiddenimports=[
         "docx",

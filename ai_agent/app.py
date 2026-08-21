@@ -50,6 +50,19 @@ def ensure_state_dirs(state_dir: Path, workspace_root: Path) -> None:
     (workspace_root / "documents").mkdir(exist_ok=True)
     (workspace_root / "scripts").mkdir(exist_ok=True)
 
+    models_dir = workspace_root / "models"
+    models_dir.mkdir(exist_ok=True)
+    models_readme = models_dir / "README.txt"
+    if not models_readme.exists():
+        models_readme.write_text(
+            "Сюда можно вручную положить модели, скачанные откуда угодно "
+            "(не только через встроенный поиск по Hugging Face) — файлы "
+            "(.gguf и т.п.) или целые папки репозиториев. Агент их не "
+            "запускает автоматически, но видит во вкладке «Модели» в "
+            "разделе «Локальные модели» (кнопка «Обновить»).\n",
+            encoding="utf-8",
+        )
+
     policy_path = state_dir / "policy.yaml"
     if not policy_path.exists():
         default_source = _default_policy_source()

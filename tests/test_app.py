@@ -31,11 +31,16 @@ def test_ensure_state_dirs_bootstraps_policy_from_template(tmp_path: Path):
     assert (state_dir / "policy.yaml").exists()
     assert (workspace / "documents").is_dir()
     assert (workspace / "scripts").is_dir()
+    assert (workspace / "models").is_dir()
+    assert (workspace / "models" / "README.txt").exists()
 
     # повторный вызов не должен перезаписывать уже существующий policy.yaml
+    # или README в models/ (пользователь мог там что-то уже разместить рядом)
     (state_dir / "policy.yaml").write_text("custom: true\n", encoding="utf-8")
+    (workspace / "models" / "README.txt").write_text("моё\n", encoding="utf-8")
     app.ensure_state_dirs(state_dir, workspace)
     assert "custom: true" in (state_dir / "policy.yaml").read_text(encoding="utf-8")
+    assert (workspace / "models" / "README.txt").read_text(encoding="utf-8") == "моё\n"
 
 
 def test_build_llm_provider_falls_back_to_echo_without_key(monkeypatch):
