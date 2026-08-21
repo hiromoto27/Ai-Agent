@@ -100,6 +100,44 @@ class _AlwaysToolCallProvider:
         )
 
 
+class _RecordingProvider:
+    """Провайдер, который записывает, что видел на входе, и отвечает эхом
+    последнего пользовательского сообщения — для проверки, что история
+    диалога реально передаётся между вызовами run_task."""
+
+    def __init__(self) -> None:
+        self.seen_message_counts: list[int] = []
+
+    def complete(self, messages, tools, system=""):
+        self.seen_message_counts.append(len(messages))
+        return LLMResponse(content=f"ответ на: {messages[-1].content}", stop_reason="end_turn")
+
+
+def test_conversation_history_persists_across_run_task_calls(tmp_path, permissive_context):
+    agent, _ = make_agent(tmp_path, permissive_context, llm=_RecordingProvider())
+
+    agent.run_task("первое сообщение")
+    agent.run_task("второе сообщение")
+
+    # На втором вызове модель должна была увидеть уже 3 сообщения в истории
+    # (user1, assistant1, user2), а не только новое.
+    assert agent.llm.seen_message_counts == [1, 3]
+    assert agent.conversation[0].content == "первое сообщение"
+    assert agent.conversation[1].role == "assistant"
+    assert agent.conversation[2].content == "второе сообщение"
+
+
+def test_reset_conversation_clears_history(tmp_path, permissive_context):
+    agent, _ = make_agent(tmp_path, permissive_context, llm=_RecordingProvider())
+
+    agent.run_task("первое сообщение")
+    agent.reset_conversation()
+    agent.run_task("новое сообщение после сброса")
+
+    assert agent.conversation[0].content == "новое сообщение после сброса"
+    assert agent.llm.seen_message_counts == [1, 1]  # оба раза "с нуля"
+
+
 def test_step_limit_is_respected(tmp_path, permissive_context):
     memory = MemoryStore(tmp_path / "memory.sqlite3")
     registry = build_default_registry()

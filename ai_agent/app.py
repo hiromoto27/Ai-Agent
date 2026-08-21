@@ -16,8 +16,9 @@ from pathlib import Path
 from ai_agent.core.autotune import ensure_settings
 from ai_agent.core.llm.base import LLMProvider
 from ai_agent.core.llm.echo_provider import EchoProvider
+from ai_agent.core.llm_settings import LLMSettings
 from ai_agent.core.memory import MemoryStore
-from ai_agent.core.orchestrator import Agent
+from ai_agent.core.orchestrator import DEFAULT_SYSTEM_PROMPT, Agent
 from ai_agent.core.policy import PolicyConfig, PolicyEngine
 from ai_agent.core.policy.engine import ConfirmCallback, always_deny
 from ai_agent.core.skills import build_default_registry
@@ -72,17 +73,70 @@ def ensure_state_dirs(state_dir: Path, workspace_root: Path) -> None:
             PolicyConfig.default().save(policy_path)
 
 
-def build_llm_provider() -> LLMProvider:
-    """Claude API, если задан ANTHROPIC_API_KEY, иначе офлайн EchoProvider."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+def _build_anthropic(settings: LLMSettings) -> LLMProvider:
+    from ai_agent.core.llm.anthropic_provider import AnthropicProvider
+
+    api_key = settings.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
+    return AnthropicProvider(api_key=api_key, model=settings.anthropic_model)
+
+
+def _build_local(settings: LLMSettings) -> LLMProvider:
+    if not settings.local_model_path:
+        raise ValueError("не указан путь к локальной модели (.gguf) в настройках")
+    from ai_agent.core.llm.local_provider import LocalLlamaProvider
+
+    return LocalLlamaProvider(model_path=settings.local_model_path, n_ctx=settings.local_n_ctx)
+
+
+def build_llm_provider(settings: LLMSettings | None = None) -> LLMProvider:
+    """Строит LLM-провайдер по настройкам пользователя.
+
+    Явный выбор (``provider`` != "auto") не деградирует молча: если он не
+    может стартовать (нет ключа/пакета/модели), исключение поднимается —
+    так пользователь ясно видит проблему вместо незаметного отката на
+    офлайн-заглушку (именно это раньше выглядело как "агент не отвечает,
+    просто повторяет вопрос"). Только "auto" перебирает варианты тихо.
+    """
+    settings = settings or LLMSettings()
+
+    if settings.provider == "echo":
+        return EchoProvider()
+    if settings.provider == "anthropic":
+        return _build_anthropic(settings)
+    if settings.provider == "local":
+        return _build_local(settings)
+
+    # auto: облако, если есть ключ, иначе локальная модель, если указана, иначе эхо.
+    api_key = settings.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
     if api_key:
         try:
-            from ai_agent.core.llm.anthropic_provider import AnthropicProvider
-
-            return AnthropicProvider(api_key=api_key)
+            return _build_anthropic(settings)
         except ImportError:
             pass
+    if settings.local_model_path:
+        try:
+            return _build_local(settings)
+        except (ImportError, ValueError):
+            pass
     return EchoProvider()
+
+
+def build_llm_provider_safe(settings: LLMSettings | None = None) -> tuple[LLMProvider, str]:
+    """Как build_llm_provider, но никогда не бросает исключение — при сбое
+    явного выбора возвращает EchoProvider и текст причины (вторым
+    элементом), чтобы вызывающий код (GUI/CLI) мог показать это
+    пользователю, а не просто уронить всё приложение при старте."""
+    try:
+        return build_llm_provider(settings), ""
+    except Exception as e:
+        return EchoProvider(), f"{type(e).__name__}: {e}"
+
+
+def combine_system_prompt(llm_settings: LLMSettings) -> str:
+    system_prompt = DEFAULT_SYSTEM_PROMPT
+    if llm_settings.system_prompt.strip():
+        system_prompt += "\n\nДополнительные инструкции от пользователя:\n" + llm_settings.system_prompt.strip()
+    return system_prompt
 
 
 def build_agent(
@@ -105,9 +159,23 @@ def build_agent(
     memory = MemoryStore(state_dir / "memory.sqlite3")
     registry = build_default_registry()
 
-    return Agent(
-        llm=llm or build_llm_provider(),
+    llm_settings_path = state_dir / "llm_settings.yaml"
+    llm_settings = LLMSettings.load(llm_settings_path)
+    setup_error = ""
+    if llm is None:
+        llm, setup_error = build_llm_provider_safe(llm_settings)
+
+    agent = Agent(
+        llm=llm,
         skills=registry,
         memory=memory,
         skill_context=skill_context,
+        system_prompt=combine_system_prompt(llm_settings),
     )
+    # Не часть контракта Agent — просто удобное место для GUI/CLI хранить
+    # текущие настройки провайдера и путь для их сохранения без отдельного
+    # объекта-контейнера.
+    agent.llm_settings = llm_settings
+    agent.llm_settings_path = llm_settings_path
+    agent.llm_setup_error = setup_error
+    return agent

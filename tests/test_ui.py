@@ -53,14 +53,15 @@ def _make_window(tmp_path: Path) -> MainWindow:
     return window
 
 
-def test_main_window_builds_with_five_tabs(qapp, tmp_path: Path):
+def test_main_window_builds_with_six_tabs(qapp, tmp_path: Path):
     window = _make_window(tmp_path)
     _wait_for_models_idle(window, qapp)
     tabs = window.centralWidget()
-    assert tabs.count() == 5
+    assert tabs.count() == 6
     titles = [tabs.tabText(i) for i in range(tabs.count())]
     assert titles == [
         theme.TAB_TITLES["chat"],
+        theme.TAB_TITLES["settings"],
         theme.TAB_TITLES["models"],
         theme.TAB_TITLES["skills"],
         theme.TAB_TITLES["memory"],
@@ -72,7 +73,7 @@ def test_skills_tab_lists_builtin_skills(qapp, tmp_path: Path):
     window = _make_window(tmp_path)
     _wait_for_models_idle(window, qapp)
     tabs = window.centralWidget()
-    skills_widget = tabs.widget(2)
+    skills_widget = tabs.widget(3)
     text = skills_widget.findChild(type(window.chat_log)).toPlainText()
     assert "files.write" in text
     assert "system.run_command" in text
@@ -149,7 +150,7 @@ def test_permissions_tab_shows_policy_summary(qapp, tmp_path: Path):
     window = _make_window(tmp_path)
     _wait_for_models_idle(window, qapp)
     tabs = window.centralWidget()
-    permissions_widget = tabs.widget(4)
+    permissions_widget = tabs.widget(5)
     text = permissions_widget.findChild(type(window.chat_log)).toPlainText()
     assert "shell.enabled: False" in text
     assert "model_download.enabled: False" in text
@@ -413,3 +414,86 @@ def test_models_tab_import_cancelled_dialog_does_nothing(qapp, tmp_path: Path, m
     window._on_import_file()
 
     assert window.model_status_label.text() == status_before
+
+
+def test_settings_tab_shows_echo_by_default(qapp, tmp_path: Path):
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+    assert "тестовый режим" in window.current_provider_label.text()
+
+
+def test_settings_tab_switch_to_echo_and_save_applies_immediately(qapp, tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake")  # чтобы "авто" не был уже echo
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    idx = window.provider_combo.findData("echo")
+    window.provider_combo.setCurrentIndex(idx)
+    window._on_save_llm_settings()
+
+    from ai_agent.core.llm.echo_provider import EchoProvider
+
+    assert isinstance(window.agent.llm, EchoProvider)
+    assert "тестовый режим" in window.current_provider_label.text()
+    assert "Настройки сохранены" in window.settings_status_label.text()
+
+    saved = (tmp_path / "state" / "llm_settings.yaml").read_text(encoding="utf-8")
+    assert "provider: echo" in saved
+
+
+def test_settings_tab_system_prompt_is_applied_to_agent(qapp, tmp_path: Path):
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    window.system_prompt_edit.setPlainText("Отвечай только эмодзи.")
+    window._on_save_llm_settings()
+
+    assert "Отвечай только эмодзи." in window.agent.system_prompt
+
+
+def test_settings_tab_explicit_anthropic_without_key_shows_setup_error(qapp, tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    idx = window.provider_combo.findData("anthropic")
+    window.provider_combo.setCurrentIndex(idx)
+    window.anthropic_key_input.setText("")
+    window._on_save_llm_settings()
+
+    from ai_agent.core.llm.echo_provider import EchoProvider
+
+    assert isinstance(window.agent.llm, EchoProvider)  # безопасный откат, не падение приложения
+    assert "не запустился" in window.settings_status_label.text()
+    assert window.agent.llm_setup_error != ""
+
+
+def test_settings_tab_local_model_combo_lists_downloaded_gguf(qapp, tmp_path: Path):
+    models_dir = tmp_path / "ws" / "models" / "Qwen__Qwen2.5-1.5B-Instruct-GGUF"
+    models_dir.mkdir(parents=True)
+    (models_dir / "model.q4_k_m.gguf").write_bytes(b"x" * 1024)
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+    window._refresh_local_model_combo()
+
+    items = [window.local_model_combo.itemText(i) for i in range(window.local_model_combo.count())]
+    assert any("model.q4_k_m.gguf" in item for item in items)
+
+
+def test_new_chat_button_clears_conversation(qapp, tmp_path: Path):
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    window.input_line.setText("привет")
+    window._on_send()
+    _wait_for_worker(window, qapp)
+    assert len(window.agent.conversation) > 0
+    assert window.chat_log.toPlainText().strip() != ""
+
+    window._on_new_chat()
+
+    assert window.agent.conversation == []
+    assert window.chat_log.toPlainText().strip() == ""

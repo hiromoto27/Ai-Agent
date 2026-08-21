@@ -59,13 +59,16 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Рабочая директория: {args.workspace}")
     print(f"Профиль производительности (автонастройка): {agent.skill_context.profile.tier}")
+    print(f"LLM-провайдер: {type(agent.llm).__name__} (настройки: {agent.llm_settings_path})")
+    if agent.llm_setup_error:
+        print(f"⚠ Выбранный провайдер не запустился, используется тестовый режим: {agent.llm_setup_error}")
 
     if args.once:
         result = agent.run_task(args.once)
         _print_result(result)
         return 0 if result.success else 1
 
-    print("Локальный ИИ-агент. Введите задачу ('exit' или Ctrl+C для выхода).")
+    print("Локальный ИИ-агент. Введите задачу ('exit' — выход, 'новый чат' — сбросить диалог).")
     while True:
         try:
             task = input("\n> ").strip()
@@ -76,6 +79,10 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if task.lower() in ("exit", "quit", "выход"):
             return 0
+        if task.lower() in ("новый чат", "new chat", "reset"):
+            agent.reset_conversation()
+            print("Диалог сброшен.")
+            continue
         result = agent.run_task(task)
         _print_result(result)
 

@@ -26,7 +26,13 @@ DEFAULT_SYSTEM_PROMPT = (
     "проходят проверку прав доступа и могут требовать подтверждения пользователя — "
     "если инструмент вернул отказ в доступе, не пытайся обойти его, а сообщи "
     "пользователю, что нужно разрешение. Используй инструмент поиска в интернете, "
-    "если не хватает знаний или подходящего навыка для задачи. Отвечай кратко и по делу."
+    "если не хватает знаний или подходящего навыка для задачи. Отвечай кратко и по делу.\n\n"
+    "Если формулировка задачи нечёткая, неполная или допускает разное толкование — "
+    "не угадывай и не действуй наугад. Задай пользователю один уточняющий вопрос "
+    "(или несколько по пунктам, если неясностей много) обычным текстовым ответом, "
+    "без вызова инструментов, и дождись ответа. Уточняй даже небольшие "
+    "неоднозначности — переспросить дешевле, чем сделать не то, что нужно. Это "
+    "продолжающийся диалог: используй контекст предыдущих сообщений."
 )
 
 
@@ -61,10 +67,16 @@ class Agent:
         self.skill_context = skill_context
         self.system_prompt = system_prompt
         self.max_steps = max_steps or skill_context.profile.max_agent_steps
+        # История диалога сохраняется между вызовами run_task в пределах
+        # одного Agent — иначе уточняющий вопрос агента ("что именно
+        # сделать?") был бы бессмысленным: следующее сообщение пользователя
+        # обрабатывалось бы как отдельная, не связанная с ним задача.
+        self.conversation: list[Message] = []
 
     def run_task(self, task: str) -> AgentResult:
         system = self.system_prompt + self._build_memory_context(task)
-        messages: list[Message] = [Message(role="user", content=task)]
+        self.conversation.append(Message(role="user", content=task))
+        messages = self.conversation
         steps: list[StepRecord] = []
         tools = self.skills.tool_schemas()
 
@@ -72,6 +84,7 @@ class Agent:
             response = self.llm.complete(messages, tools=tools, system=system)
 
             if not response.tool_calls:
+                messages.append(Message(role="assistant", content=response.content))
                 success = self._infer_success(steps)
                 self._reflect(task, steps, response.content, success)
                 return AgentResult(final_text=response.content, steps=steps, success=success)
@@ -92,8 +105,13 @@ class Agent:
                 )
 
         final_text = "Достигнут лимит шагов — задача не была завершена полностью."
+        messages.append(Message(role="assistant", content=final_text))
         self._reflect(task, steps, final_text, success=False)
         return AgentResult(final_text=final_text, steps=steps, success=False, hit_step_limit=True)
+
+    def reset_conversation(self) -> None:
+        """Начать диалог заново (не трогает долговременную память-эпизоды)."""
+        self.conversation = []
 
     def _build_memory_context(self, task: str) -> str:
         k = self.skill_context.profile.memory_retrieval_k

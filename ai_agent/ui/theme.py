@@ -22,6 +22,7 @@ ERROR_COLOR = "#f16565"
 
 TAB_TITLES = {
     "chat": "💬  Чат",
+    "settings": "⚙  Настройки",
     "skills": "🧩  Навыки",
     "memory": "🧠  Память",
     "permissions": "🔒  Права доступа",
@@ -91,6 +92,25 @@ QLineEdit {{
 
 QLineEdit:focus {{
     border: 1px solid {ACCENT};
+}}
+
+QComboBox {{
+    background-color: {BG_INPUT};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 8px 12px;
+    color: {TEXT};
+}}
+
+QComboBox:focus {{
+    border: 1px solid {ACCENT};
+}}
+
+QComboBox QAbstractItemView {{
+    background-color: {BG_PANEL};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    selection-background-color: {ACCENT};
 }}
 
 QPushButton {{

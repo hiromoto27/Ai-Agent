@@ -8,6 +8,7 @@ from PySide6.QtCore import QUrl, Qt
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -22,8 +23,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ai_agent.app import build_agent
-from ai_agent.core.orchestrator import AgentResult
+from ai_agent.app import build_agent, build_llm_provider_safe, combine_system_prompt
+from ai_agent.core.orchestrator import AgentResult, DEFAULT_SYSTEM_PROMPT
 from ai_agent.core.skills.base import SkillResult
 from ai_agent.core.skills.models import hf_login_status
 
@@ -33,6 +34,13 @@ from .skill_worker import SkillWorker
 from .worker import AgentWorker
 
 HF_TOKENS_URL = "https://huggingface.co/settings/tokens"
+
+_PROVIDER_CHOICES = [
+    ("auto", "Автоматически (облако, если есть ключ, иначе локальная модель, иначе тест)"),
+    ("anthropic", "Claude API (облако)"),
+    ("local", "Локальная модель (GGUF)"),
+    ("echo", "Тестовый режим (без ИИ — эхо, для проверки)"),
+]
 
 
 class MainWindow(QMainWindow):
@@ -61,6 +69,7 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         tabs = QTabWidget()
         tabs.addTab(self._build_chat_tab(), theme.TAB_TITLES["chat"])
+        tabs.addTab(self._build_settings_tab(), theme.TAB_TITLES["settings"])
         tabs.addTab(self._build_models_tab(), theme.TAB_TITLES["models"])
         tabs.addTab(self._build_skills_tab(), theme.TAB_TITLES["skills"])
         tabs.addTab(self._build_memory_tab(), theme.TAB_TITLES["memory"])
@@ -70,6 +79,14 @@ class MainWindow(QMainWindow):
     def _build_chat_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
+
+        header = QHBoxLayout()
+        header.addStretch()
+        self.new_chat_button = QPushButton("🔄 Новый чат")
+        self.new_chat_button.setObjectName("secondary")
+        self.new_chat_button.clicked.connect(self._on_new_chat)
+        header.addWidget(self.new_chat_button)
+        layout.addLayout(header)
 
         self.chat_log = QTextEdit()
         self.chat_log.setReadOnly(True)
@@ -84,6 +101,91 @@ class MainWindow(QMainWindow):
         row.addWidget(self.input_line)
         row.addWidget(self.send_button)
         layout.addLayout(row)
+        return widget
+
+    def _build_settings_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        settings = self.agent.llm_settings
+
+        self.current_provider_label = QLabel()
+        self.current_provider_label.setObjectName("hwSummary")
+        self.current_provider_label.setWordWrap(True)
+        layout.addWidget(self.current_provider_label)
+
+        layout.addWidget(QLabel("Провайдер ответов агента:"))
+        self.provider_combo = QComboBox()
+        for value, label in _PROVIDER_CHOICES:
+            self.provider_combo.addItem(label, value)
+        idx = self.provider_combo.findData(settings.provider)
+        self.provider_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        layout.addWidget(self.provider_combo)
+
+        layout.addWidget(QLabel("Claude API:"))
+        anthropic_row = QHBoxLayout()
+        self.anthropic_key_input = QLineEdit(settings.anthropic_api_key)
+        self.anthropic_key_input.setPlaceholderText(
+            "ANTHROPIC_API_KEY (пусто — взять из переменной окружения)"
+        )
+        self.anthropic_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        anthropic_row.addWidget(self.anthropic_key_input, 1)
+        self.anthropic_model_input = QLineEdit(settings.anthropic_model)
+        self.anthropic_model_input.setPlaceholderText("модель, например claude-sonnet-5")
+        anthropic_row.addWidget(self.anthropic_model_input)
+        layout.addLayout(anthropic_row)
+
+        local_header = QHBoxLayout()
+        local_header.addWidget(QLabel("Локальная модель (файл .gguf из workspace/models):"))
+        local_header.addStretch()
+        self.refresh_local_combo_button = QPushButton("🔄 Обновить список")
+        self.refresh_local_combo_button.setObjectName("secondary")
+        self.refresh_local_combo_button.clicked.connect(self._refresh_local_model_combo)
+        local_header.addWidget(self.refresh_local_combo_button)
+        layout.addLayout(local_header)
+
+        self.local_model_combo = QComboBox()
+        self.local_model_combo.setEditable(True)
+        layout.addWidget(self.local_model_combo)
+        self._refresh_local_model_combo()
+
+        local_hint = QLabel(
+            "Требует пакет llama-cpp-python (pip install \"ai-agent[local-llm]\") — не входит в "
+            "обычную поставку, так как на большинстве систем ставится сборкой из исходников "
+            "(нужен компилятор). Экспериментально: то, насколько модель соблюдает формат вызова "
+            "инструментов, зависит от конкретной модели — крупные следуют инструкциям надёжнее мелких."
+        )
+        local_hint.setObjectName("statusLabel")
+        local_hint.setWordWrap(True)
+        layout.addWidget(local_hint)
+
+        layout.addWidget(QLabel("Системный промпт (стиль ответов, роль, ограничения — поверх базовых инструкций):"))
+        self.system_prompt_edit = QTextEdit()
+        self.system_prompt_edit.setPlainText(settings.system_prompt)
+        self.system_prompt_edit.setPlaceholderText(
+            "Например: «Отвечай только на русском и кратко» или «Ты — ассистент по Python, "
+            "объясняй код построчно»."
+        )
+        layout.addWidget(self.system_prompt_edit, 1)
+
+        save_row = QHBoxLayout()
+        save_row.addStretch()
+        self.save_settings_button = QPushButton("💾 Сохранить и применить")
+        self.save_settings_button.clicked.connect(self._on_save_llm_settings)
+        save_row.addWidget(self.save_settings_button)
+        layout.addLayout(save_row)
+
+        self.settings_status_label = QLabel("")
+        self.settings_status_label.setObjectName("statusLabel")
+        self.settings_status_label.setWordWrap(True)
+        layout.addWidget(self.settings_status_label)
+
+        self._refresh_current_provider_label()
+        if self.agent.llm_setup_error:
+            self.settings_status_label.setText(
+                "⚠ Выбранный провайдер не смог запуститься, сейчас используется тестовый режим: "
+                f"{self.agent.llm_setup_error}"
+            )
+
         return widget
 
     def _build_skills_tab(self) -> QWidget:
@@ -274,6 +376,10 @@ class MainWindow(QMainWindow):
         self.chat_log.append(theme.system_message_html(f"[Ошибка агента] {message}"))
         self._set_busy(False)
 
+    def _on_new_chat(self) -> None:
+        self.agent.reset_conversation()
+        self.chat_log.clear()
+
     def _set_busy(self, busy: bool) -> None:
         self.input_line.setEnabled(not busy)
         self.send_button.setEnabled(not busy)
@@ -289,6 +395,62 @@ class MainWindow(QMainWindow):
             status = "успех" if episode.success else ("неудача" if episode.success is False else "?")
             lines.append(f"- [{status}] {episode.task}")
         self.memory_view.setPlainText("\n".join(lines))
+
+    # ---- обработчики: настройки LLM -------------------------------------------------
+
+    def _refresh_current_provider_label(self) -> None:
+        provider_class = type(self.agent.llm).__name__
+        names = {"AnthropicProvider": "Claude API", "LocalLlamaProvider": "локальная модель", "EchoProvider": "тестовый режим (без ИИ)"}
+        name = names.get(provider_class, provider_class)
+        self.current_provider_label.setText(f"Сейчас отвечает: {name}")
+
+    def _local_gguf_files(self) -> list[Path]:
+        models_dir = self.agent.skill_context.workspace_root / "models"
+        if not models_dir.exists():
+            return []
+        return sorted(models_dir.rglob("*.gguf"))
+
+    def _refresh_local_model_combo(self) -> None:
+        current = self.local_model_combo.currentText()
+        self.local_model_combo.clear()
+        files = self._local_gguf_files()
+        for f in files:
+            self.local_model_combo.addItem(str(f.relative_to(self.agent.skill_context.workspace_root)), str(f))
+        if not files:
+            self.local_model_combo.addItem("(в workspace/models нет .gguf-файлов)", "")
+        elif current:
+            idx = self.local_model_combo.findText(current)
+            if idx >= 0:
+                self.local_model_combo.setCurrentIndex(idx)
+
+    def _on_save_llm_settings(self) -> None:
+        from ai_agent.core.llm_settings import LLMSettings
+
+        provider = self.provider_combo.currentData()
+        local_path = self.local_model_combo.currentData() or self.local_model_combo.currentText().strip()
+        settings = LLMSettings(
+            provider=provider,
+            anthropic_model=self.anthropic_model_input.text().strip() or "claude-sonnet-5",
+            anthropic_api_key=self.anthropic_key_input.text().strip(),
+            local_model_path=local_path,
+            local_n_ctx=self.agent.llm_settings.local_n_ctx,
+            system_prompt=self.system_prompt_edit.toPlainText(),
+        )
+        settings.save(self.agent.llm_settings_path)
+
+        new_llm, error = build_llm_provider_safe(settings)
+        self.agent.llm = new_llm
+        self.agent.llm_settings = settings
+        self.agent.llm_setup_error = error
+        self.agent.system_prompt = combine_system_prompt(settings)
+
+        self._refresh_current_provider_label()
+        if error:
+            self.settings_status_label.setText(
+                f"⚠ Настройки сохранены, но провайдер не запустился (используется тестовый режим): {error}"
+            )
+        else:
+            self.settings_status_label.setText("Настройки сохранены и применены — можно возвращаться в чат.")
 
     # ---- обработчики: модели (Hugging Face + локальные) ------------------------------
 

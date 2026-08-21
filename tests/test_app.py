@@ -49,3 +49,86 @@ def test_build_llm_provider_falls_back_to_echo_without_key(monkeypatch):
 
     provider = app.build_llm_provider()
     assert isinstance(provider, EchoProvider)
+
+
+def test_build_llm_provider_auto_prefers_anthropic_when_key_present(monkeypatch):
+    from ai_agent.core.llm.anthropic_provider import AnthropicProvider
+    from ai_agent.core.llm_settings import LLMSettings
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake")
+    provider = app.build_llm_provider(LLMSettings())
+    assert isinstance(provider, AnthropicProvider)
+
+
+def test_build_llm_provider_explicit_anthropic_without_key_raises(monkeypatch):
+    from ai_agent.core.llm_settings import LLMSettings
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    try:
+        app.build_llm_provider(LLMSettings(provider="anthropic"))
+        assert False, "должно было поднять исключение"
+    except ValueError:
+        pass
+
+
+def test_build_llm_provider_explicit_local_without_path_raises():
+    from ai_agent.core.llm_settings import LLMSettings
+
+    try:
+        app.build_llm_provider(LLMSettings(provider="local"))
+        assert False, "должно было поднять исключение"
+    except ValueError:
+        pass
+
+
+def test_build_llm_provider_safe_never_raises_and_reports_reason(monkeypatch):
+    from ai_agent.core.llm.echo_provider import EchoProvider
+    from ai_agent.core.llm_settings import LLMSettings
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    provider, error = app.build_llm_provider_safe(LLMSettings(provider="anthropic"))
+    assert isinstance(provider, EchoProvider)
+    assert error  # причина сбоя не потеряна
+
+
+def test_build_llm_provider_safe_no_error_when_fine(monkeypatch):
+    from ai_agent.core.llm_settings import LLMSettings
+
+    provider, error = app.build_llm_provider_safe(LLMSettings(provider="echo"))
+    assert error == ""
+
+
+def test_build_agent_attaches_llm_settings(tmp_path: Path):
+    agent = app.build_agent(state_dir=tmp_path / "state", workspace_root=tmp_path / "ws")
+    assert agent.llm_settings_path == tmp_path / "state" / "llm_settings.yaml"
+    assert agent.llm_settings.provider == "auto"
+    assert agent.llm_setup_error == ""
+
+
+def test_build_agent_surfaces_setup_error_without_crashing(tmp_path: Path, monkeypatch):
+    from ai_agent.core.llm.echo_provider import EchoProvider
+    from ai_agent.core.llm_settings import LLMSettings
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    LLMSettings(provider="anthropic").save(state_dir / "llm_settings.yaml")
+
+    agent = app.build_agent(state_dir=state_dir, workspace_root=tmp_path / "ws")
+
+    assert isinstance(agent.llm, EchoProvider)
+    assert agent.llm_setup_error != ""
+
+
+def test_build_agent_combines_custom_system_prompt(tmp_path: Path):
+    from ai_agent.core.llm_settings import LLMSettings
+    from ai_agent.core.orchestrator import DEFAULT_SYSTEM_PROMPT
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    LLMSettings(system_prompt="Отвечай только эмодзи.").save(state_dir / "llm_settings.yaml")
+
+    agent = app.build_agent(state_dir=state_dir, workspace_root=tmp_path / "ws")
+
+    assert agent.system_prompt.startswith(DEFAULT_SYSTEM_PROMPT)
+    assert "Отвечай только эмодзи." in agent.system_prompt
