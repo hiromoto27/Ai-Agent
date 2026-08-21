@@ -23,6 +23,16 @@ def _http_error(cls, status_code: int, message: str = "error"):
     return cls(message, response=response)
 
 
+def test_xet_backend_disabled_by_default():
+    """Регрессия: скачивание больших файлов через ускоренный бэкенд Xet
+    молча обрывалось на некоторых сетях, оставляя пустую папку модели
+    (см. историю коммитов). Модуль должен выставлять HF_HUB_DISABLE_XET
+    до первого импорта huggingface_hub, чтобы качать обычным HTTPS."""
+    import huggingface_hub.constants as hf_constants
+
+    assert hf_constants.HF_HUB_DISABLE_XET is True
+
+
 def test_recommend_models_weak_pc_gets_only_smallest():
     hw = HardwareInfo(cpu_cores=2, total_ram_gb=4, has_gpu=False, os_name="Windows")
     recs = recommend_models(hw)

@@ -11,11 +11,24 @@ Hugging Face: API не даёт надёжно вычислить объём/к�
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol
 
 from ai_agent.core.autotune import HardwareInfo, Profile
+
+# huggingface_hub по умолчанию качает большие файлы через ускоренный бэкенд
+# "Xet" (отдельный протокол/CDN, отличный от обычного HTTPS). На части
+# сетей (корпоративные фаервол/прокси, некоторые антивирусы) он не проходит,
+# при этом мелкие служебные файлы репозитория (README/config.json), которые
+# идут обычным HTTP, скачиваются нормально — со стороны выглядит как "папка
+# модели создалась, но веса не скачались" (0 байт вместо гигабайтов).
+# Отключаем Xet и используем обычный HTTPS — медленнее, зато надёжнее на
+# любой сети, что важнее для десктоп-приложения массового пользователя.
+# Переменную нужно выставить ДО первого импорта huggingface_hub (эта строка
+# исполняется при импорте ai_agent.core.hf_models, что происходит раньше).
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 
 @dataclass(frozen=True)

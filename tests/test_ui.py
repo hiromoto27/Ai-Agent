@@ -358,3 +358,58 @@ def test_models_tab_download_auth_required_points_to_auth_section(qapp, tmp_path
     _wait_for_models_idle(window, qapp)
 
     assert "авторизации" in window.model_status_label.text()
+
+
+def test_models_tab_import_file_via_dialog(qapp, tmp_path: Path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+
+    source = tmp_path / "downloads" / "my-model.gguf"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"x" * 4096)
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(source), "")))
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+    monkeypatch.setattr(window.agent.skill_context.policy, "confirm_callback", lambda action, ctx: True)
+
+    window._on_import_file()
+    _wait_for_models_idle(window, qapp)
+
+    assert (tmp_path / "ws" / "models" / "my-model.gguf").exists()
+    assert window.local_models_list.count() == 1
+    assert "my-model.gguf" in window.local_models_list.item(0).text()
+
+
+def test_models_tab_import_folder_via_dialog(qapp, tmp_path: Path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+
+    source = tmp_path / "cloned-repo"
+    source.mkdir()
+    (source / "model.gguf").write_bytes(b"x" * 4096)
+
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(source)))
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+    monkeypatch.setattr(window.agent.skill_context.policy, "confirm_callback", lambda action, ctx: True)
+
+    window._on_import_folder()
+    _wait_for_models_idle(window, qapp)
+
+    assert (tmp_path / "ws" / "models" / "cloned-repo" / "model.gguf").exists()
+    assert window.local_models_list.count() == 1
+
+
+def test_models_tab_import_cancelled_dialog_does_nothing(qapp, tmp_path: Path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("", "")))
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+    status_before = window.model_status_label.text()
+
+    window._on_import_file()
+
+    assert window.model_status_label.text() == status_before

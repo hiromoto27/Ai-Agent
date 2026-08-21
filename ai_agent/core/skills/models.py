@@ -11,6 +11,7 @@ core.autotune). ``models.search_huggingface`` ищет модели на Hub.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -41,6 +42,20 @@ def _entry_size_bytes(path: Path) -> int:
         if child.is_file():
             total += child.stat().st_size
     return total
+
+
+_EMPTY_DOWNLOAD_THRESHOLD_BYTES = 4096  # только служебные файлы (config.json/README), без весов
+
+
+def _remove_if_effectively_empty(path: Path) -> None:
+    """Убирает "хвост" от неудачной попытки скачивания — если в папку
+    успели скачаться только мелкие служебные файлы (в сумме меньше
+    порога), а сами веса модели нет, папку целиком удаляем, чтобы она не
+    висела в списке локальных моделей как обманчивые "~0.0 ГБ"."""
+    if not path.exists() or not path.is_dir():
+        return
+    if _entry_size_bytes(path) <= _EMPTY_DOWNLOAD_THRESHOLD_BYTES:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 class RecommendModelsSkill(Skill):
@@ -162,6 +177,7 @@ class DownloadHuggingFaceModelSkill(Skill):
         except ImportError:
             return SkillResult(ok=False, error="huggingface_hub не установлен (extras: hf)")
         except Exception as e:
+            _remove_if_effectively_empty(target_dir / repo_id.replace("/", "__"))
             if is_auth_error(e):
                 return SkillResult(
                     ok=False,
@@ -171,7 +187,13 @@ class DownloadHuggingFaceModelSkill(Skill):
                     ),
                     data={"auth_required": True, "repo_id": repo_id},
                 )
-            return SkillResult(ok=False, error=f"ошибка скачивания модели: {e}")
+            return SkillResult(
+                ok=False,
+                error=(
+                    f"ошибка скачивания модели: {e}. Если это повторяется — попробуйте скачать модель "
+                    "в браузере вручную и добавить файл через «Импортировать файл…» ниже."
+                ),
+            )
 
         return SkillResult(
             ok=True,
@@ -214,6 +236,51 @@ class ListLocalModelsSkill(Skill):
             output="\n".join(lines),
             data={"models": entries, "path": str(target_dir)},
         )
+
+
+class ImportLocalModelSkill(Skill):
+    spec = SkillSpec(
+        name="models.import_local",
+        description=(
+            "Добавить в workspace/models модель, скачанную любым другим способом (например через "
+            "браузер вручную, а не встроенным поиском) — по указанному пути к файлу или папке на диске. "
+            "Файл/папка копируется в workspace/models."
+        ),
+        parameters=[SkillParam("source_path", "string", "Путь к файлу модели или папке репозитория на диске")],
+    )
+
+    def _run(self, context: SkillContext, source_path: str) -> SkillResult:
+        source = Path(source_path).expanduser()
+        if not source.is_absolute():
+            source = Path.cwd() / source
+        source = source.resolve()
+
+        context.policy.enforce("files.read", path=source)
+
+        if not source.exists():
+            return SkillResult(ok=False, error=f"путь не найден: {source}")
+
+        target_dir = context.resolve_path(".", subdir=MODELS_SUBDIR)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / source.name
+
+        context.policy.enforce("files.write", path=target)
+
+        if target.exists():
+            return SkillResult(
+                ok=False,
+                error=f"в workspace/models уже есть «{source.name}» — переименуйте/удалите и повторите",
+            )
+
+        try:
+            if source.is_dir():
+                shutil.copytree(source, target)
+            else:
+                shutil.copy2(source, target)
+        except OSError as e:
+            return SkillResult(ok=False, error=f"не удалось скопировать: {e}")
+
+        return SkillResult(ok=True, output=f"Добавлено в workspace/models: {target.name}", data={"path": str(target)})
 
 
 class SetHuggingFaceTokenSkill(Skill):
@@ -266,5 +333,6 @@ def register_model_skills(registry) -> None:
     registry.register(SearchHuggingFaceSkill())
     registry.register(DownloadHuggingFaceModelSkill())
     registry.register(ListLocalModelsSkill())
+    registry.register(ImportLocalModelSkill())
     registry.register(SetHuggingFaceTokenSkill())
     registry.register(ClearHuggingFaceTokenSkill())

@@ -8,6 +8,7 @@ from PySide6.QtCore import QUrl, Qt
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -209,13 +210,31 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.download_search_button)
 
         local_header = QHBoxLayout()
-        local_header.addWidget(QLabel("Локальные модели (workspace/models — можно закинуть файлы вручную):"))
+        local_header.addWidget(QLabel("Локальные модели (workspace/models):"))
         local_header.addStretch()
+        self.import_file_button = QPushButton("📄 Импортировать файл…")
+        self.import_file_button.setObjectName("secondary")
+        self.import_file_button.clicked.connect(self._on_import_file)
+        local_header.addWidget(self.import_file_button)
+
+        self.import_folder_button = QPushButton("📁 Импортировать папку…")
+        self.import_folder_button.setObjectName("secondary")
+        self.import_folder_button.clicked.connect(self._on_import_folder)
+        local_header.addWidget(self.import_folder_button)
+
         self.refresh_local_button = QPushButton("🔄 Обновить")
         self.refresh_local_button.setObjectName("secondary")
         self.refresh_local_button.clicked.connect(self._on_list_local_models)
         local_header.addWidget(self.refresh_local_button)
         layout.addLayout(local_header)
+
+        local_hint = QLabel(
+            "Если скачивание через Hugging Face не работает — скачайте модель в браузере "
+            "вручную и добавьте её сюда кнопкой «Импортировать файл/папку»."
+        )
+        local_hint.setObjectName("statusLabel")
+        local_hint.setWordWrap(True)
+        layout.addWidget(local_hint)
 
         self.local_models_list = QListWidget()
         layout.addWidget(self.local_models_list, 1)
@@ -438,6 +457,29 @@ class MainWindow(QMainWindow):
             icon = "📁" if m["is_dir"] else "📄"
             self.local_models_list.addItem(f"{icon} {m['name']} — ~{m['size_gb']} ГБ")
 
+    def _on_import_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Выберите файл модели")
+        if not path:
+            return
+        self._import_path(path)
+
+    def _on_import_folder(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Выберите папку с моделью")
+        if not path:
+            return
+        self._import_path(path)
+
+    def _import_path(self, path: str) -> None:
+        self.model_status_label.setText(f"Копирую «{path}» в workspace/models…")
+        self._run_model_skill("models.import_local", {"source_path": path}, self._on_import_finished)
+
+    def _on_import_finished(self, result: SkillResult) -> None:
+        if not result.ok:
+            self.model_status_label.setText(f"Ошибка импорта: {result.error}")
+            return
+        self.model_status_label.setText(result.output)
+        self._on_list_local_models()
+
     def _set_models_busy(self, busy: bool) -> None:
         for w in (
             self.recommend_button,
@@ -445,6 +487,8 @@ class MainWindow(QMainWindow):
             self.download_recommend_button,
             self.download_search_button,
             self.refresh_local_button,
+            self.import_file_button,
+            self.import_folder_button,
             self.model_search_input,
             self.save_hf_token_button,
             self.hf_token_input,

@@ -6,6 +6,7 @@ from huggingface_hub.errors import GatedRepoError
 from ai_agent.core.skills.models import (
     ClearHuggingFaceTokenSkill,
     DownloadHuggingFaceModelSkill,
+    ImportLocalModelSkill,
     ListLocalModelsSkill,
     RecommendModelsSkill,
     SearchHuggingFaceSkill,
@@ -60,6 +61,46 @@ def test_download_huggingface_denied_by_default(locked_context):
     result = skill.run(locked_context, repo_id="Qwen/Qwen2.5-1.5B-Instruct-GGUF")
     assert not result.ok
     assert "доступ запрещён" in result.error
+
+
+def test_download_huggingface_cleans_up_empty_folder_on_failure(permissive_context, workspace: Path):
+    """Регрессия: неудачная попытка скачивания (например Xet-бэкенд оборвался
+    после пары служебных файлов) не должна оставлять пустую папку-призрак
+    в workspace/models — иначе она путается со списком локальных моделей."""
+
+    def fake_download(**kwargs):
+        # Имитируем поведение huggingface_hub: несколько мелких файлов
+        # успели скачаться до обрыва (README.md), веса — нет.
+        out = Path(kwargs["local_dir"])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "README.md").write_text("model card", encoding="utf-8")
+        raise ConnectionError("сеть оборвалась")
+
+    skill = DownloadHuggingFaceModelSkill(download_fn=fake_download)
+    result = skill.run(permissive_context, repo_id="Qwen/Qwen2.5-1.5B-Instruct-GGUF")
+
+    assert not result.ok
+    ghost_dir = workspace / "models" / "Qwen__Qwen2.5-1.5B-Instruct-GGUF"
+    assert not ghost_dir.exists()
+
+
+def test_download_huggingface_keeps_partial_folder_with_real_content(permissive_context, workspace: Path):
+    """Если реально успело скачаться что-то весомое (не только служебные
+    файлы), папку не трогаем — это может быть возобновляемая загрузка."""
+
+    def fake_download(**kwargs):
+        out = Path(kwargs["local_dir"])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "model-00001-of-00003.gguf").write_bytes(b"x" * (10 * 1024 * 1024))
+        raise ConnectionError("сеть оборвалась на середине")
+
+    skill = DownloadHuggingFaceModelSkill(download_fn=fake_download)
+    result = skill.run(permissive_context, repo_id="Qwen/Qwen2.5-1.5B-Instruct-GGUF")
+
+    assert not result.ok
+    partial_dir = workspace / "models" / "Qwen__Qwen2.5-1.5B-Instruct-GGUF"
+    assert partial_dir.exists()
+    assert (partial_dir / "model-00001-of-00003.gguf").exists()
 
 
 def test_download_huggingface_allowed_with_permissive_context(permissive_context, workspace: Path):
@@ -173,3 +214,72 @@ def test_clear_hf_token(permissive_context, monkeypatch):
     result = ClearHuggingFaceTokenSkill().run(permissive_context)
     assert result.ok
     assert called == [True]
+
+
+def test_import_local_model_file(permissive_context, workspace: Path, tmp_path: Path):
+    source = tmp_path / "Downloads" / "qwen.gguf"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"x" * 2048)
+
+    result = ImportLocalModelSkill().run(permissive_context, source_path=str(source))
+
+    assert result.ok
+    target = workspace / "models" / "qwen.gguf"
+    assert target.exists()
+    assert target.read_bytes() == b"x" * 2048
+
+
+def test_import_local_model_folder(permissive_context, workspace: Path, tmp_path: Path):
+    source = tmp_path / "my-cloned-repo"
+    source.mkdir()
+    (source / "model.gguf").write_bytes(b"x" * 4096)
+    (source / "config.json").write_text("{}", encoding="utf-8")
+
+    result = ImportLocalModelSkill().run(permissive_context, source_path=str(source))
+
+    assert result.ok
+    target = workspace / "models" / "my-cloned-repo"
+    assert (target / "model.gguf").exists()
+    assert (target / "config.json").exists()
+
+
+def test_import_local_model_expands_user_home(permissive_context, workspace: Path, monkeypatch, tmp_path: Path):
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir()
+    (fake_home / "model.gguf").write_bytes(b"y" * 512)
+    # os.path.expanduser читает HOME на POSIX и USERPROFILE на Windows —
+    # выставляем оба, чтобы тест был переносимым между ОС в CI.
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+
+    result = ImportLocalModelSkill().run(permissive_context, source_path="~/model.gguf")
+
+    assert result.ok
+    assert (workspace / "models" / "model.gguf").exists()
+
+
+def test_import_local_model_missing_path(permissive_context, tmp_path: Path):
+    result = ImportLocalModelSkill().run(permissive_context, source_path=str(tmp_path / "does-not-exist.gguf"))
+    assert not result.ok
+    assert "не найден" in result.error
+
+
+def test_import_local_model_denied_without_confirmation(locked_context, tmp_path: Path):
+    source = tmp_path / "model.gguf"
+    source.write_bytes(b"x" * 100)
+    result = ImportLocalModelSkill().run(locked_context, source_path=str(source))
+    assert not result.ok
+    assert "доступ запрещён" in result.error
+
+
+def test_import_local_model_refuses_to_overwrite(permissive_context, workspace: Path, tmp_path: Path):
+    (workspace / "models").mkdir(parents=True, exist_ok=True)
+    (workspace / "models" / "existing.gguf").write_bytes(b"old")
+
+    source = tmp_path / "existing.gguf"
+    source.write_bytes(b"new")
+
+    result = ImportLocalModelSkill().run(permissive_context, source_path=str(source))
+
+    assert not result.ok
+    assert (workspace / "models" / "existing.gguf").read_bytes() == b"old"
