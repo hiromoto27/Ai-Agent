@@ -10,6 +10,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from ai_agent.ui import theme
@@ -188,7 +189,11 @@ def test_open_log_button_opens_log_file_via_desktop_services(qapp, tmp_path: Pat
 
     window._on_open_log_file()
 
-    assert opened == [str(window.agent.log_path)]
+    # QUrl.toLocalFile() нормализует разделители пути (на Windows
+    # обратные слэши превращаются в прямые) — сравниваем через тот же
+    # QUrl-круговорот с обеих сторон, а не с "сырой" строкой пути.
+    expected = QUrl.fromLocalFile(str(window.agent.log_path)).toLocalFile()
+    assert opened == [expected]
     assert window.agent.log_path.exists()
 
 
