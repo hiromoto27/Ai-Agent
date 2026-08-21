@@ -276,3 +276,85 @@ def test_models_tab_download_without_selection_shows_hint(qapp, tmp_path: Path):
     window.search_list.clear()  # гарантируем отсутствие выбора
     window._on_download_selected(window.search_list)
     assert "выберите модель" in window.model_status_label.text()
+
+
+def test_models_tab_shows_not_authorized_by_default(qapp, tmp_path: Path):
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+    assert "не авторизован" in window.hf_auth_status_label.text()
+
+
+def test_models_tab_open_auth_page_calls_desktop_services(qapp, tmp_path: Path, monkeypatch):
+    from PySide6.QtGui import QDesktopServices
+
+    opened = []
+    monkeypatch.setattr(QDesktopServices, "openUrl", staticmethod(lambda url: opened.append(url.toString())))
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+    window._on_open_hf_auth_page()
+
+    assert opened == ["https://huggingface.co/settings/tokens"]
+
+
+def test_models_tab_save_token_updates_status(qapp, tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("huggingface_hub.whoami", lambda token=None: {"name": "alice"})
+    monkeypatch.setattr(
+        "huggingface_hub.login",
+        lambda token=None, add_to_git_credential=False, skip_if_logged_in=True: None,
+    )
+    monkeypatch.setattr("huggingface_hub.get_token", lambda: "hf_abc123")
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    window.hf_token_input.setText("hf_abc123")
+    window._on_save_hf_token()
+    _wait_for_models_idle(window, qapp)
+
+    assert "alice" in window.model_status_label.text()
+    assert window.hf_token_input.text() == ""
+    assert "сохранён" in window.hf_auth_status_label.text()
+
+
+def test_models_tab_save_empty_token_shows_hint(qapp, tmp_path: Path):
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+    window.hf_token_input.setText("   ")
+    window._on_save_hf_token()
+    assert "Вставьте токен" in window.model_status_label.text()
+
+
+def test_models_tab_logout_clears_status(qapp, tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("huggingface_hub.logout", lambda token_name=None: None)
+    monkeypatch.setattr("huggingface_hub.get_token", lambda: None)
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+    window._on_hf_logout()
+    _wait_for_models_idle(window, qapp)
+
+    assert "не авторизован" in window.hf_auth_status_label.text()
+
+
+def test_models_tab_download_auth_required_points_to_auth_section(qapp, tmp_path: Path, monkeypatch):
+    from huggingface_hub.errors import GatedRepoError
+    import httpx
+
+    def fake_download(**kwargs):
+        response = httpx.Response(403, request=httpx.Request("GET", "https://huggingface.co/x"))
+        raise GatedRepoError("gated", response=response)
+
+    monkeypatch.setattr("ai_agent.core.hf_models._default_download", lambda **kw: fake_download(**kw))
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+    window.enable_download_checkbox.setChecked(True)
+    monkeypatch.setattr(window.agent.skill_context.policy, "confirm_callback", lambda action, ctx: True)
+
+    assert window.recommend_list.count() > 0
+    window.recommend_list.setCurrentRow(0)
+    window._on_download_selected(window.recommend_list)
+    _wait_for_models_idle(window, qapp)
+
+    assert "авторизации" in window.model_status_label.text()

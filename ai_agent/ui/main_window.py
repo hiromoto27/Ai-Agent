@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QUrl, Qt
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -23,11 +24,14 @@ from PySide6.QtWidgets import (
 from ai_agent.app import build_agent
 from ai_agent.core.orchestrator import AgentResult
 from ai_agent.core.skills.base import SkillResult
+from ai_agent.core.skills.models import hf_login_status
 
 from . import theme
 from .confirm_bridge import ConfirmBridge
 from .skill_worker import SkillWorker
 from .worker import AgentWorker
+
+HF_TOKENS_URL = "https://huggingface.co/settings/tokens"
 
 
 class MainWindow(QMainWindow):
@@ -134,6 +138,37 @@ class MainWindow(QMainWindow):
         self.enable_download_checkbox.setChecked(self.agent.skill_context.policy.config.model_download_enabled)
         self.enable_download_checkbox.toggled.connect(self._on_toggle_model_download)
         layout.addWidget(self.enable_download_checkbox)
+
+        auth_header = QHBoxLayout()
+        auth_header.addWidget(QLabel("Авторизация Hugging Face (нужна для закрытых/gated моделей):"))
+        auth_header.addStretch()
+        self.hf_auth_status_label = QLabel()
+        auth_header.addWidget(self.hf_auth_status_label)
+        layout.addLayout(auth_header)
+
+        auth_row = QHBoxLayout()
+        self.open_hf_auth_button = QPushButton("🔗 Открыть страницу авторизации")
+        self.open_hf_auth_button.setObjectName("secondary")
+        self.open_hf_auth_button.clicked.connect(self._on_open_hf_auth_page)
+        auth_row.addWidget(self.open_hf_auth_button)
+
+        self.hf_token_input = QLineEdit()
+        self.hf_token_input.setPlaceholderText("Вставьте токен (hf_...) со страницы выше")
+        self.hf_token_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.hf_token_input.returnPressed.connect(self._on_save_hf_token)
+        auth_row.addWidget(self.hf_token_input, 1)
+
+        self.save_hf_token_button = QPushButton("💾 Сохранить")
+        self.save_hf_token_button.clicked.connect(self._on_save_hf_token)
+        auth_row.addWidget(self.save_hf_token_button)
+
+        self.logout_hf_button = QPushButton("Выйти")
+        self.logout_hf_button.setObjectName("secondary")
+        self.logout_hf_button.clicked.connect(self._on_hf_logout)
+        auth_row.addWidget(self.logout_hf_button)
+        layout.addLayout(auth_row)
+
+        self._refresh_hf_auth_status()
 
         recommend_header = QHBoxLayout()
         recommend_header.addWidget(QLabel("Рекомендации под ваш ПК:"))
@@ -247,6 +282,43 @@ class MainWindow(QMainWindow):
             "Каждое скачивание всё равно попросит отдельное подтверждение."
         )
 
+    def _refresh_hf_auth_status(self) -> None:
+        # Локальная проверка (без сети) — есть ли уже сохранённый токен.
+        token = hf_login_status()
+        if token:
+            self.hf_auth_status_label.setText("токен сохранён локально")
+        else:
+            self.hf_auth_status_label.setText("не авторизован (анонимный доступ)")
+
+    def _on_open_hf_auth_page(self) -> None:
+        QDesktopServices.openUrl(QUrl(HF_TOKENS_URL))
+
+    def _on_save_hf_token(self) -> None:
+        token = self.hf_token_input.text().strip()
+        if not token:
+            self.model_status_label.setText("Вставьте токен перед сохранением.")
+            return
+        self.model_status_label.setText("Проверяю токен…")
+        self._run_model_skill("models.set_hf_token", {"token": token}, self._on_save_hf_token_finished)
+
+    def _on_save_hf_token_finished(self, result: SkillResult) -> None:
+        if not result.ok:
+            self.model_status_label.setText(f"Токен не принят: {result.error}")
+            return
+        self.hf_token_input.clear()
+        self._refresh_hf_auth_status()
+        self.model_status_label.setText(result.output)
+
+    def _on_hf_logout(self) -> None:
+        self._run_model_skill("models.clear_hf_token", {}, self._on_hf_logout_finished)
+
+    def _on_hf_logout_finished(self, result: SkillResult) -> None:
+        if not result.ok:
+            self.model_status_label.setText(f"Ошибка: {result.error}")
+            return
+        self._refresh_hf_auth_status()
+        self.model_status_label.setText("Вы вышли из аккаунта Hugging Face.")
+
     def _run_model_skill(self, name: str, kwargs: dict, on_done) -> None:
         """Запускает навык в фоне. Несколько таких вызовов могут идти
         параллельно (например при открытии вкладки), поэтому кнопки
@@ -308,7 +380,13 @@ class MainWindow(QMainWindow):
 
     def _on_search_finished(self, result: SkillResult) -> None:
         if not result.ok:
-            self.model_status_label.setText(f"Ошибка поиска: {result.error}")
+            if result.data.get("auth_required"):
+                self.model_status_label.setText(
+                    "Нужна авторизация на Hugging Face — откройте страницу токенов выше, "
+                    "получите токен и сохраните его в разделе «Авторизация»."
+                )
+            else:
+                self.model_status_label.setText(f"Ошибка поиска: {result.error}")
             return
         self.search_list.clear()
         for r in result.data["results"]:
@@ -336,7 +414,14 @@ class MainWindow(QMainWindow):
 
     def _on_download_finished(self, result: SkillResult) -> None:
         if not result.ok:
-            self.model_status_label.setText(f"Ошибка скачивания: {result.error}")
+            if result.data.get("auth_required"):
+                self.model_status_label.setText(
+                    "Эта модель требует авторизации на Hugging Face (закрытый доступ/лицензия) — "
+                    "откройте страницу токенов выше, получите токен и сохраните его в разделе «Авторизация», "
+                    "затем повторите скачивание."
+                )
+            else:
+                self.model_status_label.setText(f"Ошибка скачивания: {result.error}")
             return
         self.model_status_label.setText(result.output)
         self._on_list_local_models()  # скачанное сразу появится в разделе локальных моделей
@@ -361,5 +446,8 @@ class MainWindow(QMainWindow):
             self.download_search_button,
             self.refresh_local_button,
             self.model_search_input,
+            self.save_hf_token_button,
+            self.hf_token_input,
+            self.logout_hf_button,
         ):
             w.setEnabled(not busy)

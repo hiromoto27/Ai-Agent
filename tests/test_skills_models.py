@@ -1,11 +1,21 @@
 from pathlib import Path
 
+import httpx
+from huggingface_hub.errors import GatedRepoError
+
 from ai_agent.core.skills.models import (
+    ClearHuggingFaceTokenSkill,
     DownloadHuggingFaceModelSkill,
     ListLocalModelsSkill,
     RecommendModelsSkill,
     SearchHuggingFaceSkill,
+    SetHuggingFaceTokenSkill,
 )
+
+
+def _gated_error(message: str = "gated") -> GatedRepoError:
+    response = httpx.Response(403, request=httpx.Request("GET", "https://huggingface.co/x"))
+    return GatedRepoError(message, response=response)
 
 
 def test_recommend_models_needs_no_permissions(locked_context):
@@ -102,3 +112,64 @@ def test_list_local_models_lists_downloaded_repo_folder(permissive_context, work
     assert result.data["models"] == [
         {"name": "Qwen__Qwen2.5-1.5B-Instruct-GGUF", "is_dir": True, "size_gb": round(2048 / 1024**3, 3)}
     ]
+
+
+def test_search_huggingface_surfaces_auth_required(permissive_context):
+    class _GatedApi:
+        def list_models(self, *, search, limit, sort):
+            raise _gated_error()
+
+    skill = SearchHuggingFaceSkill(api=_GatedApi())
+    result = skill.run(permissive_context, query="meta-llama/Llama-3.1-8B-Instruct")
+    assert not result.ok
+    assert result.data.get("auth_required") is True
+
+
+def test_download_huggingface_surfaces_auth_required(permissive_context):
+    def fake_download(**kwargs):
+        raise _gated_error()
+
+    skill = DownloadHuggingFaceModelSkill(download_fn=fake_download)
+    result = skill.run(permissive_context, repo_id="meta-llama/Llama-3.1-8B-Instruct")
+    assert not result.ok
+    assert result.data.get("auth_required") is True
+    assert result.data.get("repo_id") == "meta-llama/Llama-3.1-8B-Instruct"
+
+
+def test_set_hf_token_saves_and_returns_username(permissive_context, monkeypatch):
+    monkeypatch.setattr("huggingface_hub.whoami", lambda token=None: {"name": "alice"})
+    saved = {}
+    monkeypatch.setattr(
+        "huggingface_hub.login",
+        lambda token=None, add_to_git_credential=False, skip_if_logged_in=True: saved.setdefault("token", token),
+    )
+
+    result = SetHuggingFaceTokenSkill().run(permissive_context, token="hf_abc123")
+
+    assert result.ok
+    assert result.data["username"] == "alice"
+    assert saved["token"] == "hf_abc123"
+
+
+def test_set_hf_token_denied_when_network_disabled(locked_context):
+    locked_context.policy.config.network_enabled = False
+    result = SetHuggingFaceTokenSkill().run(locked_context, token="hf_abc123")
+    assert not result.ok
+    assert "доступ запрещён" in result.error
+
+
+def test_set_hf_token_rejects_invalid_token(permissive_context, monkeypatch):
+    def fake_whoami(token=None):
+        raise _gated_error("invalid token")
+
+    monkeypatch.setattr("huggingface_hub.whoami", fake_whoami)
+    result = SetHuggingFaceTokenSkill().run(permissive_context, token="bad-token")
+    assert not result.ok
+
+
+def test_clear_hf_token(permissive_context, monkeypatch):
+    called = []
+    monkeypatch.setattr("huggingface_hub.logout", lambda token_name=None: called.append(True))
+    result = ClearHuggingFaceTokenSkill().run(permissive_context)
+    assert result.ok
+    assert called == [True]

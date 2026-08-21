@@ -1,7 +1,26 @@
 from pathlib import Path
 
+import httpx
+import pytest
+from huggingface_hub.errors import GatedRepoError, HfHubHTTPError
+
 from ai_agent.core.autotune import HardwareInfo
-from ai_agent.core.hf_models import CURATED_MODELS, HFSearchResult, download_model, recommend_models, search_models
+from ai_agent.core.hf_models import (
+    CURATED_MODELS,
+    HFSearchResult,
+    clear_token,
+    download_model,
+    get_saved_token,
+    is_auth_error,
+    recommend_models,
+    save_token,
+    search_models,
+)
+
+
+def _http_error(cls, status_code: int, message: str = "error"):
+    response = httpx.Response(status_code, request=httpx.Request("GET", "https://huggingface.co/x"))
+    return cls(message, response=response)
 
 
 def test_recommend_models_weak_pc_gets_only_smallest():
@@ -110,3 +129,69 @@ def test_download_model_forwards_allow_patterns(tmp_path: Path):
         download_fn=fake_download,
     )
     assert calls[0]["allow_patterns"] == ["*q4_k_m.gguf"]
+
+
+def test_is_auth_error_for_403():
+    assert is_auth_error(_http_error(HfHubHTTPError, 403, "forbidden"))
+
+
+def test_is_auth_error_for_401():
+    assert is_auth_error(_http_error(HfHubHTTPError, 401, "unauthorized"))
+
+
+def test_is_auth_error_for_gated_repo():
+    assert is_auth_error(_http_error(GatedRepoError, 403, "gated"))
+
+
+def test_is_auth_error_false_for_404():
+    assert not is_auth_error(_http_error(HfHubHTTPError, 404, "not found"))
+
+
+def test_is_auth_error_false_for_unrelated_exception():
+    assert not is_auth_error(ValueError("something else"))
+
+
+def test_save_token_validates_then_logs_in(monkeypatch):
+    calls = {}
+
+    def fake_whoami(token=None):
+        calls["whoami_token"] = token
+        return {"name": "alice"}
+
+    def fake_login(token=None, add_to_git_credential=False, skip_if_logged_in=True):
+        calls["login_token"] = token
+
+    monkeypatch.setattr("huggingface_hub.whoami", fake_whoami)
+    monkeypatch.setattr("huggingface_hub.login", fake_login)
+
+    info = save_token("hf_abc123")
+
+    assert info == {"name": "alice"}
+    assert calls["whoami_token"] == "hf_abc123"
+    assert calls["login_token"] == "hf_abc123"
+
+
+def test_save_token_rejects_empty_string():
+    with pytest.raises(ValueError):
+        save_token("   ")
+
+
+def test_save_token_propagates_invalid_token_error(monkeypatch):
+    def fake_whoami(token=None):
+        raise _http_error(HfHubHTTPError, 401, "invalid token")
+
+    monkeypatch.setattr("huggingface_hub.whoami", fake_whoami)
+    with pytest.raises(HfHubHTTPError):
+        save_token("bad-token")
+
+
+def test_get_saved_token_wraps_get_token(monkeypatch):
+    monkeypatch.setattr("huggingface_hub.get_token", lambda: "cached-token")
+    assert get_saved_token() == "cached-token"
+
+
+def test_clear_token_calls_logout(monkeypatch):
+    called = []
+    monkeypatch.setattr("huggingface_hub.logout", lambda token_name=None: called.append(token_name))
+    clear_token()
+    assert called == [None]

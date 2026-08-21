@@ -15,7 +15,17 @@ from pathlib import Path
 from typing import Optional
 
 from ai_agent.core.autotune import detect_hardware
-from ai_agent.core.hf_models import DownloadFn, HFApiClient, download_model, recommend_models, search_models
+from ai_agent.core.hf_models import (
+    DownloadFn,
+    HFApiClient,
+    clear_token,
+    download_model,
+    get_saved_token,
+    is_auth_error,
+    recommend_models,
+    save_token,
+    search_models,
+)
 
 from .base import Skill, SkillContext, SkillParam, SkillResult, SkillSpec
 
@@ -101,6 +111,12 @@ class SearchHuggingFaceSkill(Skill):
         except ImportError:
             return SkillResult(ok=False, error="huggingface_hub не установлен (extras: hf)")
         except Exception as e:
+            if is_auth_error(e):
+                return SkillResult(
+                    ok=False,
+                    error="нужна авторизация на Hugging Face (см. вкладку «Модели» — «Авторизация»)",
+                    data={"auth_required": True},
+                )
             return SkillResult(ok=False, error=f"ошибка поиска на Hugging Face: {e}")
 
         if not results:
@@ -146,6 +162,15 @@ class DownloadHuggingFaceModelSkill(Skill):
         except ImportError:
             return SkillResult(ok=False, error="huggingface_hub не установлен (extras: hf)")
         except Exception as e:
+            if is_auth_error(e):
+                return SkillResult(
+                    ok=False,
+                    error=(
+                        f"модель {repo_id} требует авторизации на Hugging Face "
+                        "(закрытый доступ или нужен токен) — см. вкладку «Модели» — «Авторизация»"
+                    ),
+                    data={"auth_required": True, "repo_id": repo_id},
+                )
             return SkillResult(ok=False, error=f"ошибка скачивания модели: {e}")
 
         return SkillResult(
@@ -191,8 +216,55 @@ class ListLocalModelsSkill(Skill):
         )
 
 
+class SetHuggingFaceTokenSkill(Skill):
+    spec = SkillSpec(
+        name="models.set_hf_token",
+        description=(
+            "Сохранить access-токен Hugging Face (для скачивания закрытых/gated моделей). "
+            "Токен получают на странице https://huggingface.co/settings/tokens."
+        ),
+        parameters=[SkillParam("token", "string", "Access-токен Hugging Face")],
+    )
+
+    def _run(self, context: SkillContext, token: str) -> SkillResult:
+        context.policy.enforce("web.fetch", domain="huggingface.co")
+        try:
+            info = save_token(token)
+        except ImportError:
+            return SkillResult(ok=False, error="huggingface_hub не установлен (extras: hf)")
+        except ValueError as e:
+            return SkillResult(ok=False, error=str(e))
+        except Exception as e:
+            return SkillResult(ok=False, error=f"токен не принят Hugging Face: {e}")
+
+        username = info.get("name") or info.get("fullname") or "неизвестно"
+        return SkillResult(ok=True, output=f"Вход выполнен: {username}", data={"username": username})
+
+
+class ClearHuggingFaceTokenSkill(Skill):
+    spec = SkillSpec(
+        name="models.clear_hf_token",
+        description="Удалить локально сохранённый токен Hugging Face (выйти из аккаунта).",
+        parameters=[],
+    )
+
+    def _run(self, context: SkillContext) -> SkillResult:
+        try:
+            clear_token()
+        except ImportError:
+            return SkillResult(ok=False, error="huggingface_hub не установлен (extras: hf)")
+        return SkillResult(ok=True, output="Токен удалён.")
+
+
+def hf_login_status() -> Optional[str]:
+    """Вспомогательная функция для UI: есть ли сохранённый токен (без сетевого запроса)."""
+    return get_saved_token()
+
+
 def register_model_skills(registry) -> None:
     registry.register(RecommendModelsSkill())
     registry.register(SearchHuggingFaceSkill())
     registry.register(DownloadHuggingFaceModelSkill())
     registry.register(ListLocalModelsSkill())
+    registry.register(SetHuggingFaceTokenSkill())
+    registry.register(ClearHuggingFaceTokenSkill())

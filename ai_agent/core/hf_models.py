@@ -156,3 +156,57 @@ def download_model(
     local_dir = target_dir / repo_id.replace("/", "__")
     result_path = fn(repo_id=repo_id, local_dir=str(local_dir), allow_patterns=allow_patterns)
     return Path(result_path)
+
+
+# ---- авторизация -----------------------------------------------------------------
+#
+# Часть моделей на Hugging Face (например meta-llama/Llama-3.1-8B-Instruct)
+# закрыта политикой доступа ("gated") — для скачивания нужен аккаунт,
+# принятая лицензия и access-токен. huggingface_hub.login() сохраняет токен
+# в свой стандартный локальный кеш (~/.cache/huggingface/token и на Windows
+# аналогично), после чего HfApi()/snapshot_download() подхватывают его сами,
+# без явной передачи token= в каждый вызов.
+
+
+def is_auth_error(exc: Exception) -> bool:
+    """True, если исключение похоже на "нужна авторизация/токен/лицензия"."""
+    try:
+        from huggingface_hub.errors import GatedRepoError, HfHubHTTPError
+    except ImportError:
+        return False
+
+    if isinstance(exc, GatedRepoError):
+        return True
+    if isinstance(exc, HfHubHTTPError):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        return status in (401, 403)
+    return False
+
+
+def get_saved_token() -> Optional[str]:
+    """Токен, уже сохранённый локально (через save_token), если есть."""
+    try:
+        from huggingface_hub import get_token
+    except ImportError:
+        return None
+    return get_token()
+
+
+def save_token(token: str) -> dict:
+    """Сохраняет токен в локальный кеш huggingface_hub и проверяет его
+    сразу (запрос whoami) — чтобы не сохранять явно нерабочий токен.
+    Возвращает информацию о пользователе (как минимум ``name``)."""
+    from huggingface_hub import login, whoami
+
+    token = token.strip()
+    if not token:
+        raise ValueError("пустой токен")
+    info = whoami(token=token)
+    login(token=token, add_to_git_credential=False)
+    return info
+
+
+def clear_token() -> None:
+    from huggingface_hub import logout
+
+    logout()
