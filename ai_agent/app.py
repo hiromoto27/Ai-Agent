@@ -14,15 +14,18 @@ import sys
 from pathlib import Path
 
 from ai_agent.core.autotune import ensure_settings
-from ai_agent.core.llm.base import LLMProvider
+from ai_agent.core.llm.base import LLMProvider, Message
 from ai_agent.core.llm.echo_provider import EchoProvider
 from ai_agent.core.llm_settings import LLMSettings
+from ai_agent.core.logging_setup import get_logger, setup_logging
 from ai_agent.core.memory import MemoryStore
 from ai_agent.core.orchestrator import DEFAULT_SYSTEM_PROMPT, Agent
 from ai_agent.core.policy import PolicyConfig, PolicyEngine
 from ai_agent.core.policy.engine import ConfirmCallback, always_deny
 from ai_agent.core.skills import build_default_registry
 from ai_agent.core.skills.base import SkillContext
+
+logger = get_logger("app")
 
 DEFAULT_STATE_DIR = Path.home() / ".ai-agent"
 DEFAULT_WORKSPACE = Path.home() / "AiAgentWorkspace"
@@ -132,6 +135,23 @@ def build_llm_provider_safe(settings: LLMSettings | None = None) -> tuple[LLMPro
         return EchoProvider(), f"{type(e).__name__}: {e}"
 
 
+def test_llm_connection(llm: LLMProvider) -> tuple[bool, str]:
+    """Реальная проверка связи с провайдером: короткий тестовый запрос без
+    инструментов, вне истории диалога агента. Раньше единственным
+    индикатором был статичный ярлык с именем класса провайдера — он не
+    показывал, отвечает ли провайдер вообще (неверный ключ/API недоступен/
+    файл модели битый видны только при первом реальном сообщении в чате)."""
+    probe = [Message(role="user", content="Ответь одним словом: OK")]
+    try:
+        response = llm.complete(probe, tools=[], system="Отвечай только словом OK, без пояснений.")
+    except Exception as e:
+        logger.exception("Проверка связи с LLM-провайдером не удалась")
+        return False, f"{type(e).__name__}: {e}"
+    if not response.content.strip():
+        return False, "провайдер ответил пустым сообщением"
+    return True, response.content.strip()
+
+
 def combine_system_prompt(llm_settings: LLMSettings) -> str:
     system_prompt = DEFAULT_SYSTEM_PROMPT
     if llm_settings.system_prompt.strip():
@@ -146,6 +166,7 @@ def build_agent(
     llm: LLMProvider | None = None,
 ) -> Agent:
     ensure_state_dirs(state_dir, workspace_root)
+    log_path = setup_logging(state_dir)
 
     profile = ensure_settings(state_dir / "settings.yaml")
     policy_config = PolicyConfig.load(state_dir / "policy.yaml")
@@ -178,4 +199,9 @@ def build_agent(
     agent.llm_settings = llm_settings
     agent.llm_settings_path = llm_settings_path
     agent.llm_setup_error = setup_error
+    agent.log_path = log_path
+
+    logger.info("Агент собран: provider=%s -> %s", llm_settings.provider, type(llm).__name__)
+    if setup_error:
+        logger.warning("Выбранный провайдер не запустился, откат на EchoProvider: %s", setup_error)
     return agent

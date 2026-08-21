@@ -120,6 +120,36 @@ def test_build_agent_surfaces_setup_error_without_crashing(tmp_path: Path, monke
     assert agent.llm_setup_error != ""
 
 
+def test_llm_connection_success_with_echo_provider():
+    from ai_agent.core.llm.echo_provider import EchoProvider
+
+    ok, message = app.test_llm_connection(EchoProvider())
+    assert ok is True
+    assert message
+
+
+def test_llm_connection_failure_reports_exception():
+    class _BrokenProvider:
+        def complete(self, messages, tools, system=""):
+            raise ConnectionError("сервер недоступен")
+
+    ok, message = app.test_llm_connection(_BrokenProvider())
+    assert ok is False
+    assert "сервер недоступен" in message
+
+
+def test_llm_connection_failure_on_empty_response():
+    from ai_agent.core.llm.base import LLMResponse
+
+    class _EmptyProvider:
+        def complete(self, messages, tools, system=""):
+            return LLMResponse(content="   ")
+
+    ok, message = app.test_llm_connection(_EmptyProvider())
+    assert ok is False
+    assert "пустым" in message
+
+
 def test_build_agent_combines_custom_system_prompt(tmp_path: Path):
     from ai_agent.core.llm_settings import LLMSettings
     from ai_agent.core.orchestrator import DEFAULT_SYSTEM_PROMPT

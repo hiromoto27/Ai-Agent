@@ -14,7 +14,21 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ai_agent.core.autotune import Profile, build_profile, detect_hardware
+from ai_agent.core.logging_setup import get_logger
 from ai_agent.core.policy import PermissionDenied, PolicyEngine
+
+logger = get_logger("skills")
+
+_SECRET_KWARG_MARKERS = ("token", "key", "password", "secret")
+
+
+def _redact_kwargs(kwargs: dict) -> dict:
+    """Не пишем в лог значения аргументов, похожих на секреты (токены и
+    т.п.) — лог-файл может попасть в переписку при разборе проблемы."""
+    return {
+        k: ("***" if any(marker in k.lower() for marker in _SECRET_KWARG_MARKERS) else v)
+        for k, v in kwargs.items()
+    }
 
 
 @dataclass
@@ -96,8 +110,10 @@ class Skill(ABC):
         try:
             return self._run(context, **kwargs)
         except PermissionDenied as e:
+            logger.info("%s отклонён политикой: %s", self.spec.name, e)
             return SkillResult(ok=False, error=f"доступ запрещён: {e}")
         except Exception as e:  # защитный барьер — навык не должен ронять агента
+            logger.exception("%s упал с исключением (аргументы: %s)", self.spec.name, _redact_kwargs(kwargs))
             return SkillResult(ok=False, error=f"{type(e).__name__}: {e}")
 
     @abstractmethod

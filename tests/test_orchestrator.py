@@ -1,7 +1,9 @@
+import logging
 from pathlib import Path
 
 from ai_agent.core.llm.base import LLMResponse, Message, ToolCall
 from ai_agent.core.llm.echo_provider import EchoProvider
+from ai_agent.core.logging_setup import setup_logging
 from ai_agent.core.memory import MemoryStore
 from ai_agent.core.orchestrator import Agent
 from ai_agent.core.skills import build_default_registry
@@ -136,6 +138,63 @@ def test_reset_conversation_clears_history(tmp_path, permissive_context):
 
     assert agent.conversation[0].content == "новое сообщение после сброса"
     assert agent.llm.seen_message_counts == [1, 1]  # оба раза "с нуля"
+
+
+class _FailingProvider:
+    """Провайдер, у которого complete() всегда падает — эмулирует сетевую
+    ошибку/сбой API, чтобы проверить, что оркестратор не роняет агента."""
+
+    def complete(self, messages, tools, system=""):
+        raise ConnectionError("не удалось соединиться с сервером провайдера")
+
+
+def _flush_log_handlers():
+    for handler in logging.getLogger("ai_agent").handlers:
+        handler.flush()
+
+
+def test_llm_failure_returns_graceful_result_instead_of_raising(tmp_path, permissive_context):
+    agent, memory = make_agent(tmp_path, permissive_context, llm=_FailingProvider())
+
+    result = agent.run_task("сделай что-нибудь")
+
+    assert result.success is False
+    assert result.steps == []
+    assert "не удалось соединиться с сервером провайдера" in result.final_text
+    assert "_FailingProvider" in result.final_text
+
+
+def test_llm_failure_keeps_conversation_consistent(tmp_path, permissive_context):
+    agent, _ = make_agent(tmp_path, permissive_context, llm=_FailingProvider())
+
+    agent.run_task("сделай что-нибудь")
+
+    assert len(agent.conversation) == 2
+    assert agent.conversation[0].role == "user"
+    assert agent.conversation[0].content == "сделай что-нибудь"
+    assert agent.conversation[1].role == "assistant"
+    assert "не удалось соединиться с сервером провайдера" in agent.conversation[1].content
+
+
+def test_llm_failure_is_recorded_in_memory_as_unsuccessful_episode(tmp_path, permissive_context):
+    agent, memory = make_agent(tmp_path, permissive_context, llm=_FailingProvider())
+
+    agent.run_task("сделай что-нибудь")
+
+    recent = memory.recent(1)
+    assert recent[0].success is False
+
+
+def test_llm_failure_is_logged_with_traceback(tmp_path, permissive_context):
+    log_path = setup_logging(tmp_path)
+    agent, _ = make_agent(tmp_path, permissive_context, llm=_FailingProvider())
+
+    agent.run_task("сделай что-нибудь")
+    _flush_log_handlers()
+
+    content = log_path.read_text(encoding="utf-8")
+    assert "ConnectionError" in content
+    assert "Traceback" in content
 
 
 def test_step_limit_is_respected(tmp_path, permissive_context):

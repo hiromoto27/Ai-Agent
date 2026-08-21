@@ -15,8 +15,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ai_agent.core.llm.base import LLMProvider, Message
+from ai_agent.core.logging_setup import get_logger
 from ai_agent.core.memory import MemoryStore
 from ai_agent.core.skills.base import SkillContext, SkillRegistry, SkillResult
+
+logger = get_logger("orchestrator")
 
 DEFAULT_SYSTEM_PROMPT = (
     "Ты — локальный ИИ-агент, помогающий пользователю на его личном компьютере. "
@@ -81,7 +84,14 @@ class Agent:
         tools = self.skills.tool_schemas()
 
         for _ in range(self.max_steps):
-            response = self.llm.complete(messages, tools=tools, system=system)
+            try:
+                response = self.llm.complete(messages, tools=tools, system=system)
+            except Exception as e:
+                logger.exception("Ошибка обращения к LLM-провайдеру")
+                error_text = f"Не удалось получить ответ от провайдера ({type(self.llm).__name__}): {e}"
+                messages.append(Message(role="assistant", content=error_text))
+                self._reflect(task, steps, error_text, success=False)
+                return AgentResult(final_text=error_text, steps=steps, success=False)
 
             if not response.tool_calls:
                 messages.append(Message(role="assistant", content=response.content))

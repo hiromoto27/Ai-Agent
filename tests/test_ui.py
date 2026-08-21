@@ -10,7 +10,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from ai_agent.ui import theme
 from ai_agent.ui.main_window import MainWindow
@@ -45,6 +45,15 @@ def _wait_for_models_idle(window, app, timeout_ms=5000):
         app.processEvents()
         if (time.monotonic() - start) * 1000 > timeout_ms:
             raise TimeoutError("models tab did not finish in time")
+    app.processEvents()
+
+
+def _wait_for_llm_test(window, app, timeout_ms=5000):
+    start = time.monotonic()
+    while window._llm_test_worker is not None and window._llm_test_worker.isRunning():
+        app.processEvents()
+        if (time.monotonic() - start) * 1000 > timeout_ms:
+            raise TimeoutError("llm connection test did not finish in time")
     app.processEvents()
 
 
@@ -155,6 +164,32 @@ def test_permissions_tab_shows_policy_summary(qapp, tmp_path: Path):
     assert "shell.enabled: False" in text
     assert "model_download.enabled: False" in text
     assert "policy.yaml" in text
+
+
+def test_permissions_tab_shows_log_path_and_open_button(qapp, tmp_path: Path):
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+    tabs = window.centralWidget()
+    permissions_widget = tabs.widget(5)
+
+    labels_text = " ".join(child.text() for child in permissions_widget.findChildren(QLabel))
+    assert str(window.agent.log_path) in labels_text
+    assert window.open_log_button in permissions_widget.findChildren(QPushButton)
+
+
+def test_open_log_button_opens_log_file_via_desktop_services(qapp, tmp_path: Path, monkeypatch):
+    from PySide6.QtGui import QDesktopServices
+
+    opened = []
+    monkeypatch.setattr(QDesktopServices, "openUrl", staticmethod(lambda url: opened.append(url.toLocalFile())))
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    window._on_open_log_file()
+
+    assert opened == [str(window.agent.log_path)]
+    assert window.agent.log_path.exists()
 
 
 def test_models_tab_shows_recommendations_on_open(qapp, tmp_path: Path):
@@ -468,6 +503,99 @@ def test_settings_tab_explicit_anthropic_without_key_shows_setup_error(qapp, tmp
     assert isinstance(window.agent.llm, EchoProvider)  # безопасный откат, не падение приложения
     assert "не запустился" in window.settings_status_label.text()
     assert window.agent.llm_setup_error != ""
+
+
+def test_settings_tab_connection_test_success_with_echo_provider(qapp, tmp_path: Path):
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    window._on_test_llm_connection()
+    assert not window.test_connection_button.isEnabled()
+    _wait_for_llm_test(window, qapp)
+
+    assert window.test_connection_button.isEnabled()
+    assert "✅" in window.settings_status_label.text()
+
+
+def test_settings_tab_connection_test_reports_failure(qapp, tmp_path: Path):
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    class _BrokenProvider:
+        def complete(self, messages, tools, system=""):
+            raise ConnectionError("сервер недоступен")
+
+    window.agent.llm = _BrokenProvider()
+    window._on_test_llm_connection()
+    _wait_for_llm_test(window, qapp)
+
+    assert "❌" in window.settings_status_label.text()
+    assert "сервер недоступен" in window.settings_status_label.text()
+
+
+def test_models_tab_connection_test_success(qapp, tmp_path: Path, monkeypatch):
+    class _FakeModelInfo:
+        def __init__(self, id):
+            self.id = id
+            self.downloads = 1
+            self.likes = 0
+            self.tags = []
+
+    class _FakeApi:
+        def list_models(self, *, search, limit, sort):
+            return [_FakeModelInfo("test/model")][:limit]
+
+    monkeypatch.setattr("ai_agent.core.hf_models._default_api", lambda: _FakeApi())
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    window._on_test_hf_connection()
+    _wait_for_models_idle(window, qapp)
+
+    assert "✅" in window.model_status_label.text()
+
+
+def test_models_tab_connection_test_reports_failure(qapp, tmp_path: Path, monkeypatch):
+    class _FakeApi:
+        def list_models(self, *, search, limit, sort):
+            raise ConnectionError("сеть недоступна")
+
+    monkeypatch.setattr("ai_agent.core.hf_models._default_api", lambda: _FakeApi())
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    window._on_test_hf_connection()
+    _wait_for_models_idle(window, qapp)
+
+    assert "❌" in window.model_status_label.text()
+    assert "сеть недоступна" in window.model_status_label.text()
+
+
+def test_models_tab_refresh_local_shows_feedback_even_when_unchanged(qapp, tmp_path: Path):
+    """Раньше повторное нажатие «Обновить» без изменений в workspace/models
+    не меняло статус-строку — выглядело так, будто кнопка не работает."""
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    window.model_status_label.setText("")
+    window._on_list_local_models()
+    _wait_for_models_idle(window, qapp)
+
+    assert window.model_status_label.text() != ""
+    assert "Обновлено" in window.model_status_label.text()
+
+
+def test_settings_tab_refresh_local_combo_shows_feedback(qapp, tmp_path: Path):
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    window.settings_status_label.setText("")
+    window._refresh_local_model_combo()
+
+    assert window.settings_status_label.text() != ""
+    assert "Обновлено" in window.settings_status_label.text()
 
 
 def test_settings_tab_local_model_combo_lists_downloaded_gguf(qapp, tmp_path: Path):

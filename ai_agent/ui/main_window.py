@@ -30,6 +30,7 @@ from ai_agent.core.skills.models import hf_login_status
 
 from . import theme
 from .confirm_bridge import ConfirmBridge
+from .llm_test_worker import LLMConnectionTestWorker
 from .skill_worker import SkillWorker
 from .worker import AgentWorker
 
@@ -62,6 +63,7 @@ class MainWindow(QMainWindow):
         self._worker: AgentWorker | None = None
         self._model_workers: list[SkillWorker] = []
         self._models_busy_count = 0
+        self._llm_test_worker: LLMConnectionTestWorker | None = None
         self._build_ui()
 
     # ---- построение интерфейса --------------------------------------------------
@@ -108,10 +110,16 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(widget)
         settings = self.agent.llm_settings
 
+        provider_status_row = QHBoxLayout()
         self.current_provider_label = QLabel()
         self.current_provider_label.setObjectName("hwSummary")
         self.current_provider_label.setWordWrap(True)
-        layout.addWidget(self.current_provider_label)
+        provider_status_row.addWidget(self.current_provider_label, 1)
+        self.test_connection_button = QPushButton("🔌 Проверить подключение")
+        self.test_connection_button.setObjectName("secondary")
+        self.test_connection_button.clicked.connect(self._on_test_llm_connection)
+        provider_status_row.addWidget(self.test_connection_button)
+        layout.addLayout(provider_status_row)
 
         layout.addWidget(QLabel("Провайдер ответов агента:"))
         self.provider_combo = QComboBox()
@@ -210,6 +218,18 @@ class MainWindow(QMainWindow):
     def _build_permissions_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
+
+        log_row = QHBoxLayout()
+        log_label = QLabel(f"Журнал ошибок и диагностики: {self.agent.log_path}")
+        log_label.setObjectName("statusLabel")
+        log_label.setWordWrap(True)
+        log_row.addWidget(log_label, 1)
+        self.open_log_button = QPushButton("📄 Открыть журнал")
+        self.open_log_button.setObjectName("secondary")
+        self.open_log_button.clicked.connect(self._on_open_log_file)
+        log_row.addWidget(self.open_log_button)
+        layout.addLayout(log_row)
+
         view = QTextEdit()
         view.setReadOnly(True)
         config = self.agent.skill_context.policy.config
@@ -272,6 +292,14 @@ class MainWindow(QMainWindow):
         layout.addLayout(auth_row)
 
         self._refresh_hf_auth_status()
+
+        test_hf_row = QHBoxLayout()
+        self.test_hf_button = QPushButton("🔌 Проверить связь с Hugging Face")
+        self.test_hf_button.setObjectName("secondary")
+        self.test_hf_button.clicked.connect(self._on_test_hf_connection)
+        test_hf_row.addWidget(self.test_hf_button)
+        test_hf_row.addStretch()
+        layout.addLayout(test_hf_row)
 
         recommend_header = QHBoxLayout()
         recommend_header.addWidget(QLabel("Рекомендации под ваш ПК:"))
@@ -404,6 +432,30 @@ class MainWindow(QMainWindow):
         name = names.get(provider_class, provider_class)
         self.current_provider_label.setText(f"Сейчас отвечает: {name}")
 
+    def _on_test_llm_connection(self) -> None:
+        self.test_connection_button.setEnabled(False)
+        self.settings_status_label.setText("Проверяю связь с провайдером…")
+        self._llm_test_worker = LLMConnectionTestWorker(self.agent.llm, parent=self)
+        self._llm_test_worker.finished_test.connect(self._on_llm_connection_test_finished)
+        self._llm_test_worker.start()
+
+    def _on_llm_connection_test_finished(self, ok: bool, message: str) -> None:
+        self.test_connection_button.setEnabled(True)
+        provider_class = type(self.agent.llm).__name__
+        if ok:
+            self.settings_status_label.setText(
+                f"✅ Связь есть — {provider_class} ответил: «{message}»"
+            )
+        else:
+            self.settings_status_label.setText(
+                f"❌ Связи нет ({provider_class}): {message}"
+            )
+            log_hint = getattr(self.agent, "log_path", None)
+            if log_hint:
+                self.settings_status_label.setText(
+                    self.settings_status_label.text() + f"\nПодробности в журнале: {log_hint}"
+                )
+
     def _local_gguf_files(self) -> list[Path]:
         models_dir = self.agent.skill_context.workspace_root / "models"
         if not models_dir.exists():
@@ -422,6 +474,12 @@ class MainWindow(QMainWindow):
             idx = self.local_model_combo.findText(current)
             if idx >= 0:
                 self.local_model_combo.setCurrentIndex(idx)
+        # На первом вызове (при построении вкладки) этой метки ещё нет —
+        # обратную связь показываем только по нажатию кнопки «Обновить».
+        if hasattr(self, "settings_status_label"):
+            self.settings_status_label.setText(
+                f"Обновлено: найдено .gguf-файлов — {len(files)}." if files else "Обновлено: .gguf-файлов не найдено."
+            )
 
     def _on_save_llm_settings(self) -> None:
         from ai_agent.core.llm_settings import LLMSettings
@@ -451,6 +509,15 @@ class MainWindow(QMainWindow):
             )
         else:
             self.settings_status_label.setText("Настройки сохранены и применены — можно возвращаться в чат.")
+
+    # ---- обработчики: права доступа / диагностика ------------------------------------
+
+    def _on_open_log_file(self) -> None:
+        log_path = self.agent.log_path
+        if not log_path.exists():
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.touch()
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_path)))
 
     # ---- обработчики: модели (Hugging Face + локальные) ------------------------------
 
@@ -552,6 +619,28 @@ class MainWindow(QMainWindow):
         else:
             self.model_status_label.setText("Подходящих моделей под текущее железо не нашлось.")
 
+    def _on_test_hf_connection(self) -> None:
+        self.model_status_label.setText("Проверяю связь с Hugging Face…")
+        self._run_model_skill(
+            "models.search_huggingface", {"query": "gguf", "max_results": 1}, self._on_test_hf_connection_finished
+        )
+
+    def _on_test_hf_connection_finished(self, result: SkillResult) -> None:
+        if not result.ok:
+            if result.data.get("auth_required"):
+                self.model_status_label.setText(
+                    "❌ Связь есть, но нужна авторизация на Hugging Face — откройте страницу токенов выше, "
+                    "получите токен и сохраните его в разделе «Авторизация»."
+                )
+            else:
+                text = f"❌ Связи с Hugging Face нет: {result.error}"
+                log_hint = getattr(self.agent, "log_path", None)
+                if log_hint:
+                    text += f"\nПодробности в журнале: {log_hint}"
+                self.model_status_label.setText(text)
+            return
+        self.model_status_label.setText("✅ Связь с Hugging Face есть — поиск моделей работает.")
+
     def _on_search_models(self) -> None:
         query = self.model_search_input.text().strip()
         if not query:
@@ -618,6 +707,10 @@ class MainWindow(QMainWindow):
         for m in result.data["models"]:
             icon = "📁" if m["is_dir"] else "📄"
             self.local_models_list.addItem(f"{icon} {m['name']} — ~{m['size_gb']} ГБ")
+        count = len(result.data["models"])
+        self.model_status_label.setText(
+            f"Обновлено: локальных моделей — {count}." if count else "Обновлено: локальных моделей нет."
+        )
 
     def _on_import_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Выберите файл модели")
@@ -655,5 +748,6 @@ class MainWindow(QMainWindow):
             self.save_hf_token_button,
             self.hf_token_input,
             self.logout_hf_button,
+            self.test_hf_button,
         ):
             w.setEnabled(not busy)
