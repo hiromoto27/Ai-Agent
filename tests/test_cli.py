@@ -53,7 +53,7 @@ def test_once_tool_call_with_auto_approve_creates_file(tmp_path: Path):
         ]
     )
     assert exit_code == 0
-    assert (workspace / "notes.txt").read_text() == "created by agent"
+    assert (workspace / "notes.txt").read_text(encoding="utf-8") == "created by agent"
 
 
 def test_once_tool_call_denied_without_yes_flag(tmp_path: Path, monkeypatch):

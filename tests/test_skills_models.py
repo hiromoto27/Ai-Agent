@@ -83,7 +83,7 @@ def test_list_local_models_needs_no_permissions(locked_context, workspace: Path)
     models_dir = workspace / "models"
     models_dir.mkdir()
     (models_dir / "manual.gguf").write_bytes(b"x" * 1024)
-    (models_dir / "README.txt").write_text("подсказка, должна игнорироваться")
+    (models_dir / "README.txt").write_text("подсказка, должна игнорироваться", encoding="utf-8")
 
     result = ListLocalModelsSkill().run(locked_context)
     assert result.ok

@@ -10,7 +10,7 @@ def test_write_script_creates_file_in_scripts_dir(permissive_context):
     assert result.ok
     target = permissive_context.workspace_root / "scripts" / "helper.py"
     assert target.exists()
-    assert "from helper script" in target.read_text()
+    assert "from helper script" in target.read_text(encoding="utf-8")
 
 
 def test_write_script_allowed_even_when_execute_locked(locked_context):

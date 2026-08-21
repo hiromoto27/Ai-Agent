@@ -117,7 +117,7 @@ def test_send_tool_task_creates_file_after_confirmation(qapp, tmp_path: Path, mo
 
     target = tmp_path / "ws" / "notes.txt"
     assert target.exists()
-    assert target.read_text() == "from gui"
+    assert target.read_text(encoding="utf-8") == "from gui"
     assert "files.write" in window.chat_log.toPlainText()
 
 

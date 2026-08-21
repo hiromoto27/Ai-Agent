@@ -39,7 +39,7 @@ def test_task_with_successful_tool_call(tmp_path, permissive_context):
     assert result.steps[0].tool_name == "files.write"
     assert result.steps[0].result.ok
     assert result.success is True
-    assert (permissive_context.workspace_root / "notes.txt").read_text() == "hello"
+    assert (permissive_context.workspace_root / "notes.txt").read_text(encoding="utf-8") == "hello"
 
     recent = memory.recent(1)
     assert recent[0].success is True
