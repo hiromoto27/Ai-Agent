@@ -94,7 +94,11 @@ def _build_local(settings: LLMSettings) -> LLMProvider:
 def _build_lmstudio(settings: LLMSettings) -> LLMProvider:
     from ai_agent.core.llm.lmstudio_provider import LMStudioProvider
 
-    return LMStudioProvider(base_url=settings.lmstudio_base_url, model=settings.lmstudio_model)
+    return LMStudioProvider(
+        base_url=settings.lmstudio_base_url,
+        model=settings.lmstudio_model,
+        api_key=settings.lmstudio_api_key,
+    )
 
 
 def build_llm_provider(settings: LLMSettings | None = None) -> LLMProvider:

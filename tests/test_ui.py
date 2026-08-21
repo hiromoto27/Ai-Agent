@@ -635,23 +635,46 @@ def test_settings_tab_switch_to_lmstudio_and_save_applies_immediately(qapp, tmp_
     window.provider_combo.setCurrentIndex(idx)
     window.lmstudio_url_input.setText("http://localhost:9999/v1")
     window.lmstudio_model_combo.setEditText("my-model")
+    window.lmstudio_api_key_input.setText("secret-key")
     window._on_save_llm_settings()
 
     assert isinstance(window.agent.llm, LMStudioProvider)
     assert window.agent.llm.base_url == "http://localhost:9999/v1"
     assert window.agent.llm.model == "my-model"
+    assert window.agent.llm.api_key == "secret-key"
     assert "LM Studio" in window.current_provider_label.text()
 
     saved = (tmp_path / "state" / "llm_settings.yaml").read_text(encoding="utf-8")
     assert "provider: lmstudio" in saved
     assert "http://localhost:9999/v1" in saved
     assert "my-model" in saved
+    assert "secret-key" in saved
+
+
+def test_settings_tab_lmstudio_refresh_models_sends_api_key(qapp, tmp_path: Path, monkeypatch):
+    captured = {}
+
+    def _fake_list_models(base_url, api_key=""):
+        captured["base_url"] = base_url
+        captured["api_key"] = api_key
+        return ["m1"]
+
+    monkeypatch.setattr("ai_agent.ui.lmstudio_models_worker.list_models", _fake_list_models)
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    window.lmstudio_api_key_input.setText("secret-key")
+    window._on_refresh_lmstudio_models()
+    _wait_for_lmstudio_models(window, qapp)
+
+    assert captured["api_key"] == "secret-key"
 
 
 def test_settings_tab_lmstudio_refresh_models_populates_combo(qapp, tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         "ai_agent.ui.lmstudio_models_worker.list_models",
-        lambda base_url: ["qwen2.5-1.5b-instruct", "llama-3.1-8b"],
+        lambda base_url, api_key="": ["qwen2.5-1.5b-instruct", "llama-3.1-8b"],
     )
 
     window = _make_window(tmp_path)
@@ -666,7 +689,7 @@ def test_settings_tab_lmstudio_refresh_models_populates_combo(qapp, tmp_path: Pa
 
 
 def test_settings_tab_lmstudio_refresh_models_reports_connection_error(qapp, tmp_path: Path, monkeypatch):
-    def _raise(base_url):
+    def _raise(base_url, api_key=""):
         raise ConnectionError("сервер LM Studio недоступен")
 
     monkeypatch.setattr("ai_agent.ui.lmstudio_models_worker.list_models", _raise)

@@ -100,6 +100,13 @@ def test_build_llm_provider_explicit_lmstudio_passes_model():
     assert provider.model == "qwen2.5-1.5b-instruct"
 
 
+def test_build_llm_provider_explicit_lmstudio_passes_api_key():
+    from ai_agent.core.llm_settings import LLMSettings
+
+    provider = app.build_llm_provider(LLMSettings(provider="lmstudio", lmstudio_api_key="secret-key"))
+    assert provider.api_key == "secret-key"
+
+
 def test_build_llm_provider_safe_never_raises_and_reports_reason(monkeypatch):
     from ai_agent.core.llm.echo_provider import EchoProvider
     from ai_agent.core.llm_settings import LLMSettings

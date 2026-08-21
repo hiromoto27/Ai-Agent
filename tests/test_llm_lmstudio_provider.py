@@ -2,6 +2,7 @@ import pytest
 
 from ai_agent.core.llm.base import Message, ToolCall
 from ai_agent.core.llm.lmstudio_provider import (
+    DEFAULT_BASE_URL,
     LMStudioConnectionError,
     LMStudioProvider,
     list_models,
@@ -21,9 +22,10 @@ TOOLS = [
 
 
 class _FakeResponse:
-    def __init__(self, data, status_ok=True) -> None:
+    def __init__(self, data, status_ok=True, status_code=200) -> None:
         self._data = data
         self._status_ok = status_ok
+        self.status_code = status_code
 
     def raise_for_status(self):
         if not self._status_ok:
@@ -34,10 +36,11 @@ class _FakeResponse:
 
 
 class _FakeHttpClient:
-    def __init__(self, chat_response=None, models_response=None, raise_on="") -> None:
+    def __init__(self, chat_response=None, models_response=None, raise_on="", status_code=200) -> None:
         self.chat_response = chat_response
         self.models_response = models_response
         self.raise_on = raise_on
+        self.status_code = status_code
         self.last_post: dict | None = None
         self.closed = False
 
@@ -45,12 +48,12 @@ class _FakeHttpClient:
         if self.raise_on == "post":
             raise ConnectionError("сервер недоступен")
         self.last_post = {"path": path, "json": json}
-        return _FakeResponse(self.chat_response)
+        return _FakeResponse(self.chat_response, status_code=self.status_code)
 
     def get(self, path):
         if self.raise_on == "get":
             raise ConnectionError("сервер недоступен")
-        return _FakeResponse(self.models_response)
+        return _FakeResponse(self.models_response, status_code=self.status_code)
 
     def close(self):
         self.closed = True
@@ -166,6 +169,42 @@ def test_connection_failure_raises_lmstudio_connection_error():
 
     with pytest.raises(LMStudioConnectionError):
         provider.complete([Message(role="user", content="привет")], tools=[], system="")
+
+
+def test_401_response_raises_with_api_key_hint():
+    fake = _FakeHttpClient(chat_response=_text_response("не важно"), status_code=401)
+    provider = LMStudioProvider(http_client=fake)
+
+    with pytest.raises(LMStudioConnectionError, match="API"):
+        provider.complete([Message(role="user", content="привет")], tools=[], system="")
+
+
+def test_403_response_raises_with_api_key_hint():
+    fake = _FakeHttpClient(chat_response=_text_response("не важно"), status_code=403)
+    provider = LMStudioProvider(http_client=fake)
+
+    with pytest.raises(LMStudioConnectionError, match="API"):
+        provider.complete([Message(role="user", content="привет")], tools=[], system="")
+
+
+def test_list_models_401_raises_with_api_key_hint():
+    fake = _FakeHttpClient(models_response={"data": []}, status_code=401)
+
+    with pytest.raises(LMStudioConnectionError, match="API"):
+        list_models(http_client=fake)
+
+
+def test_api_key_sent_as_bearer_header_via_default_client():
+    from ai_agent.core.llm.lmstudio_provider import _auth_headers, _default_http_client
+
+    assert _auth_headers("secret-key") == {"Authorization": "Bearer secret-key"}
+    assert _auth_headers("") == {}
+
+    client = _default_http_client(DEFAULT_BASE_URL, 10.0, "secret-key")
+    try:
+        assert client.headers["Authorization"] == "Bearer secret-key"
+    finally:
+        client.close()
 
 
 def test_default_model_placeholder_used_when_not_configured():

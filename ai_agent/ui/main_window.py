@@ -188,10 +188,19 @@ class MainWindow(QMainWindow):
             self.lmstudio_model_combo.addItem(settings.lmstudio_model)
         layout.addWidget(self.lmstudio_model_combo)
 
+        self.lmstudio_api_key_input = QLineEdit(settings.lmstudio_api_key)
+        self.lmstudio_api_key_input.setPlaceholderText(
+            "API-ключ LM Studio (только если включено Require API Key) — обычно не нужен"
+        )
+        self.lmstudio_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addWidget(self.lmstudio_api_key_input)
+
         lmstudio_hint = QLabel(
             "Запустите модель в приложении LM Studio и включите локальный сервер "
             "(Settings → Developer → Enable Local Server), затем нажмите «Обновить список моделей» — "
-            "поле модели можно оставить пустым, если в LM Studio загружена только одна модель."
+            "поле модели можно оставить пустым, если в LM Studio загружена только одна модель. "
+            "Ошибка «401 Unauthorized» означает, что в LM Studio включено «Require API Key» — "
+            "укажите тот же ключ в поле выше."
         )
         lmstudio_hint.setObjectName("statusLabel")
         lmstudio_hint.setWordWrap(True)
@@ -494,9 +503,10 @@ class MainWindow(QMainWindow):
 
     def _on_refresh_lmstudio_models(self) -> None:
         base_url = self.lmstudio_url_input.text().strip() or "http://localhost:1234/v1"
+        api_key = self.lmstudio_api_key_input.text().strip()
         self.refresh_lmstudio_models_button.setEnabled(False)
         self.settings_status_label.setText("Запрашиваю список моделей у LM Studio…")
-        self._lmstudio_models_worker = LMStudioModelsWorker(base_url, parent=self)
+        self._lmstudio_models_worker = LMStudioModelsWorker(base_url, api_key=api_key, parent=self)
         self._lmstudio_models_worker.finished_models.connect(self._on_lmstudio_models_finished)
         self._lmstudio_models_worker.failed.connect(self._on_lmstudio_models_failed)
         self._lmstudio_models_worker.start()
@@ -565,6 +575,7 @@ class MainWindow(QMainWindow):
             local_n_ctx=self.agent.llm_settings.local_n_ctx,
             lmstudio_base_url=self.lmstudio_url_input.text().strip() or DEFAULT_LMSTUDIO_BASE_URL,
             lmstudio_model=self.lmstudio_model_combo.currentText().strip(),
+            lmstudio_api_key=self.lmstudio_api_key_input.text().strip(),
             system_prompt=self.system_prompt_edit.toPlainText(),
         )
         settings.save(self.agent.llm_settings_path)

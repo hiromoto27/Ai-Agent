@@ -36,6 +36,10 @@ _HINT = (
     "Убедитесь, что в LM Studio включён локальный сервер "
     "(Developer → Enable Local Server) и загружена модель."
 )
+_AUTH_HINT = (
+    "LM Studio отклонил запрос как неавторизованный (в Developer → Local Server включено "
+    "«Require API Key»). Укажите тот же ключ в настройках агента в поле «API-ключ LM Studio»."
+)
 
 
 class LMStudioConnectionError(ConnectionError):
@@ -47,21 +51,35 @@ class HttpClient(Protocol):
     def post(self, path: str, *, json: dict) -> Any: ...
 
 
-def _default_http_client(base_url: str, timeout: float) -> HttpClient:
+def _auth_headers(api_key: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+
+def _default_http_client(base_url: str, timeout: float, api_key: str = "") -> HttpClient:
     try:
         import httpx
     except ImportError as e:
         raise ImportError("Пакет 'httpx' не установлен. Установите extras: pip install -e '.[web]'") from e
-    return httpx.Client(base_url=base_url, timeout=timeout)
+    return httpx.Client(base_url=base_url, timeout=timeout, headers=_auth_headers(api_key))
 
 
-def list_models(base_url: str = DEFAULT_BASE_URL, timeout: float = 10.0, http_client: Optional[HttpClient] = None) -> list[str]:
+def list_models(
+    base_url: str = DEFAULT_BASE_URL,
+    timeout: float = 10.0,
+    api_key: str = "",
+    http_client: Optional[HttpClient] = None,
+) -> list[str]:
     """GET /models — идентификаторы моделей, которые LM Studio отдаёт прямо сейчас."""
     owns_client = http_client is None
-    client = http_client or _default_http_client(base_url, timeout)
+    client = http_client or _default_http_client(base_url, timeout, api_key)
     try:
         response = client.get("/models")
+        if getattr(response, "status_code", 200) in (401, 403):
+            raise LMStudioConnectionError(_AUTH_HINT)
         response.raise_for_status()
+    except LMStudioConnectionError:
+        logger.exception("Не удалось получить список моделей LM Studio (%s)", base_url)
+        raise
     except Exception as e:
         logger.exception("Не удалось получить список моделей LM Studio (%s)", base_url)
         raise LMStudioConnectionError(f"не удалось получить список моделей от LM Studio ({base_url}): {e}. {_HINT}") from e
@@ -112,6 +130,7 @@ class LMStudioProvider(LLMProvider):
         self,
         base_url: str = DEFAULT_BASE_URL,
         model: str = "",
+        api_key: str = "",
         max_tokens: int = DEFAULT_MAX_TOKENS,
         temperature: float = DEFAULT_TEMPERATURE,
         timeout: float = DEFAULT_TIMEOUT,
@@ -119,6 +138,7 @@ class LMStudioProvider(LLMProvider):
     ) -> None:
         self.base_url = base_url.rstrip("/") or DEFAULT_BASE_URL
         self.model = model
+        self.api_key = api_key
         self.max_tokens = max_tokens
         self.temperature = temperature
         # Соединение не проверяется здесь — конструктор явного выбора
@@ -126,7 +146,7 @@ class LMStudioProvider(LLMProvider):
         # LM Studio может быть ещё не запущен на момент старта агента).
         # Проверка реальной доступности — кнопка "Проверить подключение"
         # в настройках, либо первый реальный вызов complete().
-        self._client = http_client or _default_http_client(self.base_url, timeout)
+        self._client = http_client or _default_http_client(self.base_url, timeout, api_key)
 
     def complete(self, messages: list[Message], tools: list[dict], system: str = "") -> LLMResponse:
         payload: dict[str, Any] = {
@@ -140,7 +160,11 @@ class LMStudioProvider(LLMProvider):
 
         try:
             response = self._client.post("/chat/completions", json=payload)
+            if getattr(response, "status_code", 200) in (401, 403):
+                raise LMStudioConnectionError(_AUTH_HINT)
             response.raise_for_status()
+        except LMStudioConnectionError:
+            raise
         except Exception as e:
             # Не логируем здесь: complete() всегда вызывается либо из
             # Agent.run_task(), либо из test_llm_connection() — оба уже
