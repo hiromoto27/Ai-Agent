@@ -58,6 +58,15 @@ def _wait_for_llm_test(window, app, timeout_ms=5000):
     app.processEvents()
 
 
+def _wait_for_lmstudio_models(window, app, timeout_ms=5000):
+    start = time.monotonic()
+    while window._lmstudio_models_worker is not None and window._lmstudio_models_worker.isRunning():
+        app.processEvents()
+        if (time.monotonic() - start) * 1000 > timeout_ms:
+            raise TimeoutError("lmstudio models worker did not finish in time")
+    app.processEvents()
+
+
 def _make_window(tmp_path: Path) -> MainWindow:
     window = MainWindow(state_dir=tmp_path / "state", workspace_root=tmp_path / "ws")
     return window
@@ -614,6 +623,63 @@ def test_settings_tab_local_model_combo_lists_downloaded_gguf(qapp, tmp_path: Pa
 
     items = [window.local_model_combo.itemText(i) for i in range(window.local_model_combo.count())]
     assert any("model.q4_k_m.gguf" in item for item in items)
+
+
+def test_settings_tab_switch_to_lmstudio_and_save_applies_immediately(qapp, tmp_path: Path):
+    from ai_agent.core.llm.lmstudio_provider import LMStudioProvider
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    idx = window.provider_combo.findData("lmstudio")
+    window.provider_combo.setCurrentIndex(idx)
+    window.lmstudio_url_input.setText("http://localhost:9999/v1")
+    window.lmstudio_model_combo.setEditText("my-model")
+    window._on_save_llm_settings()
+
+    assert isinstance(window.agent.llm, LMStudioProvider)
+    assert window.agent.llm.base_url == "http://localhost:9999/v1"
+    assert window.agent.llm.model == "my-model"
+    assert "LM Studio" in window.current_provider_label.text()
+
+    saved = (tmp_path / "state" / "llm_settings.yaml").read_text(encoding="utf-8")
+    assert "provider: lmstudio" in saved
+    assert "http://localhost:9999/v1" in saved
+    assert "my-model" in saved
+
+
+def test_settings_tab_lmstudio_refresh_models_populates_combo(qapp, tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "ai_agent.ui.lmstudio_models_worker.list_models",
+        lambda base_url: ["qwen2.5-1.5b-instruct", "llama-3.1-8b"],
+    )
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    window._on_refresh_lmstudio_models()
+    _wait_for_lmstudio_models(window, qapp)
+
+    items = [window.lmstudio_model_combo.itemText(i) for i in range(window.lmstudio_model_combo.count())]
+    assert items == ["qwen2.5-1.5b-instruct", "llama-3.1-8b"]
+    assert "Обновлено" in window.settings_status_label.text()
+
+
+def test_settings_tab_lmstudio_refresh_models_reports_connection_error(qapp, tmp_path: Path, monkeypatch):
+    def _raise(base_url):
+        raise ConnectionError("сервер LM Studio недоступен")
+
+    monkeypatch.setattr("ai_agent.ui.lmstudio_models_worker.list_models", _raise)
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    window._on_refresh_lmstudio_models()
+    _wait_for_lmstudio_models(window, qapp)
+
+    assert "❌" in window.settings_status_label.text()
+    assert "сервер LM Studio недоступен" in window.settings_status_label.text()
+    assert window.refresh_lmstudio_models_button.isEnabled()
 
 
 def test_new_chat_button_clears_conversation(qapp, tmp_path: Path):

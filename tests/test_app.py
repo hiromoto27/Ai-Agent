@@ -81,6 +81,25 @@ def test_build_llm_provider_explicit_local_without_path_raises():
         pass
 
 
+def test_build_llm_provider_explicit_lmstudio_constructs_without_network():
+    from ai_agent.core.llm.lmstudio_provider import LMStudioProvider
+    from ai_agent.core.llm_settings import LLMSettings
+
+    # Конструктор явного выбора LM Studio не должен блокироваться на
+    # сетевом запросе — соединение проверяется отдельно (кнопка
+    # "Проверить подключение"), не на старте агента.
+    provider = app.build_llm_provider(LLMSettings(provider="lmstudio", lmstudio_base_url="http://localhost:1234/v1"))
+    assert isinstance(provider, LMStudioProvider)
+    assert provider.base_url == "http://localhost:1234/v1"
+
+
+def test_build_llm_provider_explicit_lmstudio_passes_model():
+    from ai_agent.core.llm_settings import LLMSettings
+
+    provider = app.build_llm_provider(LLMSettings(provider="lmstudio", lmstudio_model="qwen2.5-1.5b-instruct"))
+    assert provider.model == "qwen2.5-1.5b-instruct"
+
+
 def test_build_llm_provider_safe_never_raises_and_reports_reason(monkeypatch):
     from ai_agent.core.llm.echo_provider import EchoProvider
     from ai_agent.core.llm_settings import LLMSettings

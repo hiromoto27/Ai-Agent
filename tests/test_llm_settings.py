@@ -9,6 +9,8 @@ def test_defaults():
     assert settings.anthropic_model == "claude-sonnet-5"
     assert settings.anthropic_api_key == ""
     assert settings.local_model_path == ""
+    assert settings.lmstudio_base_url == "http://localhost:1234/v1"
+    assert settings.lmstudio_model == ""
     assert settings.system_prompt == ""
 
 
@@ -25,6 +27,8 @@ def test_save_then_load_roundtrip(tmp_path: Path):
         anthropic_api_key="sk-ant-secret",
         local_model_path="/home/user/AiAgentWorkspace/models/Qwen__Qwen2.5-1.5B-Instruct-GGUF/model.gguf",
         local_n_ctx=8192,
+        lmstudio_base_url="http://192.168.1.10:1234/v1",
+        lmstudio_model="qwen2.5-1.5b-instruct",
         system_prompt="Отвечай только на русском и всегда предлагай план из шагов.",
     )
     original.save(path)

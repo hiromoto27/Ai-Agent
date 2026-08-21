@@ -91,6 +91,12 @@ def _build_local(settings: LLMSettings) -> LLMProvider:
     return LocalLlamaProvider(model_path=settings.local_model_path, n_ctx=settings.local_n_ctx)
 
 
+def _build_lmstudio(settings: LLMSettings) -> LLMProvider:
+    from ai_agent.core.llm.lmstudio_provider import LMStudioProvider
+
+    return LMStudioProvider(base_url=settings.lmstudio_base_url, model=settings.lmstudio_model)
+
+
 def build_llm_provider(settings: LLMSettings | None = None) -> LLMProvider:
     """Строит LLM-провайдер по настройкам пользователя.
 
@@ -108,6 +114,8 @@ def build_llm_provider(settings: LLMSettings | None = None) -> LLMProvider:
         return _build_anthropic(settings)
     if settings.provider == "local":
         return _build_local(settings)
+    if settings.provider == "lmstudio":
+        return _build_lmstudio(settings)
 
     # auto: облако, если есть ключ, иначе локальная модель, если указана, иначе эхо.
     api_key = settings.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")

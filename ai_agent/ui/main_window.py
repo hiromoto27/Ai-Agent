@@ -31,6 +31,7 @@ from ai_agent.core.skills.models import hf_login_status
 from . import theme
 from .confirm_bridge import ConfirmBridge
 from .llm_test_worker import LLMConnectionTestWorker
+from .lmstudio_models_worker import LMStudioModelsWorker
 from .skill_worker import SkillWorker
 from .worker import AgentWorker
 
@@ -39,7 +40,8 @@ HF_TOKENS_URL = "https://huggingface.co/settings/tokens"
 _PROVIDER_CHOICES = [
     ("auto", "Автоматически (облако, если есть ключ, иначе локальная модель, иначе тест)"),
     ("anthropic", "Claude API (облако)"),
-    ("local", "Локальная модель (GGUF)"),
+    ("local", "Локальная модель (GGUF, встроенный движок)"),
+    ("lmstudio", "LM Studio (модель, запущенная в LM Studio)"),
     ("echo", "Тестовый режим (без ИИ — эхо, для проверки)"),
 ]
 
@@ -64,6 +66,7 @@ class MainWindow(QMainWindow):
         self._model_workers: list[SkillWorker] = []
         self._models_busy_count = 0
         self._llm_test_worker: LLMConnectionTestWorker | None = None
+        self._lmstudio_models_worker: LMStudioModelsWorker | None = None
         self._build_ui()
 
     # ---- построение интерфейса --------------------------------------------------
@@ -165,6 +168,34 @@ class MainWindow(QMainWindow):
         local_hint.setObjectName("statusLabel")
         local_hint.setWordWrap(True)
         layout.addWidget(local_hint)
+
+        lmstudio_header = QHBoxLayout()
+        lmstudio_header.addWidget(QLabel("LM Studio (адрес локального сервера):"))
+        lmstudio_header.addStretch()
+        self.refresh_lmstudio_models_button = QPushButton("🔄 Обновить список моделей")
+        self.refresh_lmstudio_models_button.setObjectName("secondary")
+        self.refresh_lmstudio_models_button.clicked.connect(self._on_refresh_lmstudio_models)
+        lmstudio_header.addWidget(self.refresh_lmstudio_models_button)
+        layout.addLayout(lmstudio_header)
+
+        self.lmstudio_url_input = QLineEdit(settings.lmstudio_base_url)
+        self.lmstudio_url_input.setPlaceholderText("http://localhost:1234/v1")
+        layout.addWidget(self.lmstudio_url_input)
+
+        self.lmstudio_model_combo = QComboBox()
+        self.lmstudio_model_combo.setEditable(True)
+        if settings.lmstudio_model:
+            self.lmstudio_model_combo.addItem(settings.lmstudio_model)
+        layout.addWidget(self.lmstudio_model_combo)
+
+        lmstudio_hint = QLabel(
+            "Запустите модель в приложении LM Studio и включите локальный сервер "
+            "(Settings → Developer → Enable Local Server), затем нажмите «Обновить список моделей» — "
+            "поле модели можно оставить пустым, если в LM Studio загружена только одна модель."
+        )
+        lmstudio_hint.setObjectName("statusLabel")
+        lmstudio_hint.setWordWrap(True)
+        layout.addWidget(lmstudio_hint)
 
         layout.addWidget(QLabel("Системный промпт (стиль ответов, роль, ограничения — поверх базовых инструкций):"))
         self.system_prompt_edit = QTextEdit()
@@ -428,7 +459,12 @@ class MainWindow(QMainWindow):
 
     def _refresh_current_provider_label(self) -> None:
         provider_class = type(self.agent.llm).__name__
-        names = {"AnthropicProvider": "Claude API", "LocalLlamaProvider": "локальная модель", "EchoProvider": "тестовый режим (без ИИ)"}
+        names = {
+            "AnthropicProvider": "Claude API",
+            "LocalLlamaProvider": "локальная модель",
+            "LMStudioProvider": "LM Studio",
+            "EchoProvider": "тестовый режим (без ИИ)",
+        }
         name = names.get(provider_class, provider_class)
         self.current_provider_label.setText(f"Сейчас отвечает: {name}")
 
@@ -456,6 +492,41 @@ class MainWindow(QMainWindow):
                     self.settings_status_label.text() + f"\nПодробности в журнале: {log_hint}"
                 )
 
+    def _on_refresh_lmstudio_models(self) -> None:
+        base_url = self.lmstudio_url_input.text().strip() or "http://localhost:1234/v1"
+        self.refresh_lmstudio_models_button.setEnabled(False)
+        self.settings_status_label.setText("Запрашиваю список моделей у LM Studio…")
+        self._lmstudio_models_worker = LMStudioModelsWorker(base_url, parent=self)
+        self._lmstudio_models_worker.finished_models.connect(self._on_lmstudio_models_finished)
+        self._lmstudio_models_worker.failed.connect(self._on_lmstudio_models_failed)
+        self._lmstudio_models_worker.start()
+
+    def _on_lmstudio_models_finished(self, models: list[str]) -> None:
+        self.refresh_lmstudio_models_button.setEnabled(True)
+        current = self.lmstudio_model_combo.currentText()
+        self.lmstudio_model_combo.clear()
+        self.lmstudio_model_combo.addItems(models)
+        if current:
+            idx = self.lmstudio_model_combo.findText(current)
+            if idx >= 0:
+                self.lmstudio_model_combo.setCurrentIndex(idx)
+            else:
+                self.lmstudio_model_combo.setEditText(current)
+        if models:
+            self.settings_status_label.setText(f"Обновлено: моделей в LM Studio — {len(models)}.")
+        else:
+            self.settings_status_label.setText(
+                "LM Studio ответил, но не отдал ни одной модели — загрузите модель в приложении."
+            )
+
+    def _on_lmstudio_models_failed(self, message: str) -> None:
+        self.refresh_lmstudio_models_button.setEnabled(True)
+        text = f"❌ Не удалось получить список моделей LM Studio: {message}"
+        log_hint = getattr(self.agent, "log_path", None)
+        if log_hint:
+            text += f"\nПодробности в журнале: {log_hint}"
+        self.settings_status_label.setText(text)
+
     def _local_gguf_files(self) -> list[Path]:
         models_dir = self.agent.skill_context.workspace_root / "models"
         if not models_dir.exists():
@@ -482,7 +553,7 @@ class MainWindow(QMainWindow):
             )
 
     def _on_save_llm_settings(self) -> None:
-        from ai_agent.core.llm_settings import LLMSettings
+        from ai_agent.core.llm_settings import DEFAULT_LMSTUDIO_BASE_URL, LLMSettings
 
         provider = self.provider_combo.currentData()
         local_path = self.local_model_combo.currentData() or self.local_model_combo.currentText().strip()
@@ -492,6 +563,8 @@ class MainWindow(QMainWindow):
             anthropic_api_key=self.anthropic_key_input.text().strip(),
             local_model_path=local_path,
             local_n_ctx=self.agent.llm_settings.local_n_ctx,
+            lmstudio_base_url=self.lmstudio_url_input.text().strip() or DEFAULT_LMSTUDIO_BASE_URL,
+            lmstudio_model=self.lmstudio_model_combo.currentText().strip(),
             system_prompt=self.system_prompt_edit.toPlainText(),
         )
         settings.save(self.agent.llm_settings_path)
