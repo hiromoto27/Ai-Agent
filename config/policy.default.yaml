@@ -38,12 +38,19 @@ network:
 package_install:
   enabled: false
 
+# Скачивание моделей с Hugging Face Hub (может занимать гигабайты и
+# требует времени/трафика) — по умолчанию выключено, каждое скачивание
+# требует подтверждения (см. confirmation_required_for).
+model_download:
+  enabled: false
+
 # Действия из этого списка агент обязан подтвердить у пользователя перед
 # выполнением, даже если политика их в принципе разрешает.
 confirmation_required_for:
   - shell.execute
   - scripting.execute
   - package.install
+  - model.download
   - files.write_outside_workspace
   - files.read_outside_workspace
 

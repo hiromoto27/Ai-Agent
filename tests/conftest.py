@@ -31,6 +31,7 @@ def permissive_context(workspace: Path) -> SkillContext:
     config.shell_enabled = True
     config.scripting_execute_enabled = True
     config.package_install_enabled = True
+    config.model_download_enabled = True
     engine = PolicyEngine(config, workspace_root=workspace, confirm_callback=always_allow)
     return SkillContext(workspace_root=workspace, policy=engine, profile=TEST_PROFILE)
 

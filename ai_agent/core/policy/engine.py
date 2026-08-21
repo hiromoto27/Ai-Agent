@@ -57,11 +57,13 @@ class PolicyConfig:
     network_allow_domains: list[str] = field(default_factory=lambda: ["*"])
     network_deny_domains: list[str] = field(default_factory=list)
     package_install_enabled: bool = False
+    model_download_enabled: bool = False
     confirmation_required_for: list[str] = field(
         default_factory=lambda: [
             "shell.execute",
             "scripting.execute",
             "package.install",
+            "model.download",
             "files.write_outside_workspace",
             "files.read_outside_workspace",
         ]
@@ -82,6 +84,7 @@ class PolicyConfig:
         scripting = raw.get("scripting", {})
         network = raw.get("network", {})
         package_install = raw.get("package_install", {})
+        model_download = raw.get("model_download", {})
         return cls(
             workspace_only=raw.get("workspace_only", True),
             filesystem_allow_read=fs.get("allow_read", []),
@@ -95,6 +98,7 @@ class PolicyConfig:
             network_allow_domains=network.get("allow_domains", ["*"]),
             network_deny_domains=network.get("deny_domains", []),
             package_install_enabled=package_install.get("enabled", False),
+            model_download_enabled=model_download.get("enabled", False),
             confirmation_required_for=raw.get(
                 "confirmation_required_for", cls().confirmation_required_for
             ),
@@ -125,6 +129,7 @@ class PolicyConfig:
                 "deny_domains": self.network_deny_domains,
             },
             "package_install": {"enabled": self.package_install_enabled},
+            "model_download": {"enabled": self.model_download_enabled},
             "confirmation_required_for": self.confirmation_required_for,
             "audit_log": self.audit_log,
         }
@@ -246,6 +251,14 @@ class PolicyEngine:
         requires_confirmation = "package.install" in self.config.confirmation_required_for
         return PolicyDecision(True, requires_confirmation=requires_confirmation)
 
+    def check_model_download(self) -> PolicyDecision:
+        if not self.config.model_download_enabled:
+            return PolicyDecision(
+                False, reason="скачивание моделей отключено (model_download.enabled=false)"
+            )
+        requires_confirmation = "model.download" in self.config.confirmation_required_for
+        return PolicyDecision(True, requires_confirmation=requires_confirmation)
+
     # ---- единая точка входа для навыков ------------------------------------------
 
     def enforce(self, action: str, **context) -> None:
@@ -276,6 +289,8 @@ class PolicyEngine:
             return self.check_network(context.get("domain", ""))
         if action == "package.install":
             return self.check_package_install(context.get("package", ""))
+        if action == "model.download":
+            return self.check_model_download()
         return PolicyDecision(False, reason=f"неизвестное действие: {action}")
 
     def _audit(self, action: str, context: dict, decision: PolicyDecision, confirmed: Optional[bool]) -> None:

@@ -30,6 +30,7 @@ a = Analysis(
         "openpyxl",
         "reportlab",
         "httpx",
+        "huggingface_hub",
         "PySide6.QtCore",
         "PySide6.QtGui",
         "PySide6.QtWidgets",

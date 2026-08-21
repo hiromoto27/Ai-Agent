@@ -143,6 +143,21 @@ def test_package_install_enabled_requires_confirmation(tmp_path):
     engine.enforce("package.install", package="requests")
 
 
+def test_model_download_disabled_by_default(tmp_path):
+    engine, _ = make_engine(tmp_path)
+    with pytest.raises(PermissionDenied):
+        engine.enforce("model.download", repo_id="Qwen/Qwen2.5-1.5B-Instruct-GGUF")
+
+
+def test_model_download_enabled_requires_confirmation(tmp_path):
+    engine, _ = make_engine(tmp_path, model_download_enabled=True)
+    engine.confirm_callback = always_deny
+    with pytest.raises(PermissionDenied):
+        engine.enforce("model.download", repo_id="Qwen/Qwen2.5-1.5B-Instruct-GGUF")
+    engine.confirm_callback = always_allow
+    engine.enforce("model.download", repo_id="Qwen/Qwen2.5-1.5B-Instruct-GGUF")
+
+
 def test_audit_log_written(tmp_path):
     engine, workspace = make_engine(tmp_path)
     engine.enforce("files.write", path=workspace / "a.txt")
