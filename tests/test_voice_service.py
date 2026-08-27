@@ -178,3 +178,66 @@ def test_transcribe_file_delegates_to_stt(tmp_path: Path):
     service = VoiceService(store=store, stt_factory=lambda: FakeSTT([]))
     text = service.transcribe_file(tmp_path / "sample.wav")
     assert text == "распознанный текст файла"
+
+
+def test_set_input_device_updates_attribute(tmp_path: Path):
+    store = VoiceStore(tmp_path / "voice.sqlite3")
+    service = VoiceService(store=store)
+    assert service.input_device is None
+    service.set_input_device(2)
+    assert service.input_device == 2
+
+
+def test_on_level_updates_current_level(tmp_path: Path):
+    store = VoiceStore(tmp_path / "voice.sqlite3")
+    service = VoiceService(store=store)
+    assert service.current_level == 0.0
+    service._on_level(0.55)
+    assert service.current_level == 0.55
+
+
+def test_record_once_wires_level_callback_to_capture(tmp_path: Path):
+    store = VoiceStore(tmp_path / "voice.sqlite3")
+    capture = FakeCapture([b"chunk"])
+    service = VoiceService(
+        store=store,
+        audio_capture_factory=lambda: capture,
+        stt_factory=lambda: FakeSTT(["текст"]),
+    )
+    service.record_once(max_seconds=5)
+    assert capture.level_callback == service._on_level
+    assert service.current_level == 0.0  # сброшен в конце record_once
+
+
+def test_start_continuous_wires_level_callback_to_capture(tmp_path: Path):
+    store = VoiceStore(tmp_path / "voice.sqlite3")
+    capture = FakeContinuousCapture([])
+    service = VoiceService(
+        store=store,
+        audio_capture_factory=lambda: capture,
+        stt_factory=lambda: FakeSTT([]),
+    )
+    service.start_continuous()
+    try:
+        assert capture.level_callback == service._on_level
+    finally:
+        service.stop_continuous()
+    assert service.current_level == 0.0  # сброшен при остановке
+
+
+def test_preload_stt_uses_requested_model_size_and_caches(tmp_path: Path, monkeypatch):
+    store = VoiceStore(tmp_path / "voice.sqlite3")
+    created = []
+
+    def fake_create(model_size="base"):
+        created.append(model_size)
+        return FakeSTT([])
+
+    monkeypatch.setattr("ai_agent.core.voice.service.create_stt_engine", fake_create)
+
+    service = VoiceService(store=store)
+    engine = service.preload_stt("small")
+
+    assert created == ["small"]
+    assert service._get_stt() is engine  # закешировано — create_stt_engine не вызывается повторно
+    assert created == ["small"]

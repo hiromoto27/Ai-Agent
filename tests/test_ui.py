@@ -883,3 +883,88 @@ def test_voice_tab_reminder_check_appends_chat_message(qapp, tmp_path: Path):
 
     assert "Срок сегодня" in window.chat_log.toPlainText()
     assert "Бюджет" in window.chat_log.toPlainText()
+
+
+def test_voice_tab_level_meter_reflects_current_level(qapp, tmp_path: Path):
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+    _wait_for_voice_idle(window, qapp)
+
+    window.agent.skill_context.voice.current_level = 0.75
+    window._on_level_tick()
+    assert window.level_meter.value() == 75
+
+    window.agent.skill_context.voice.current_level = 0.0
+    window._on_level_tick()
+    assert window.level_meter.value() == 0
+
+
+def test_voice_tab_device_combo_populated_and_selection_persisted(qapp, tmp_path: Path, monkeypatch):
+    import ai_agent.core.voice.audio as audio_module
+
+    devices = [
+        {"index": 0, "name": "Микрофон А", "channels": 1, "default_samplerate": 16000.0, "is_default": True},
+        {"index": 1, "name": "Микрофон Б", "channels": 1, "default_samplerate": 16000.0, "is_default": False},
+    ]
+    monkeypatch.setattr(audio_module, "list_input_devices", lambda: devices)
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+    _wait_for_voice_idle(window, qapp)
+
+    # +1 за пункт "Устройство по умолчанию".
+    assert window.device_combo.count() == 3
+
+    window.device_combo.setCurrentIndex(2)  # "Микрофон Б" (index=1)
+    assert window.agent.voice_settings.input_device == 1
+    assert window.agent.skill_context.voice.input_device == 1
+
+    from ai_agent.core.voice_settings import VoiceSettings
+
+    reloaded = VoiceSettings.load(window.agent.voice_settings_path)
+    assert reloaded.input_device == 1
+
+
+def test_voice_tab_install_button_installs_and_downloads_model(qapp, tmp_path: Path, monkeypatch):
+    import ai_agent.core.skills.voice as voice_skills
+    import ai_agent.core.voice.setup as setup_module
+
+    installed = {"done": False}
+
+    def fake_check_dependencies():
+        ready = installed["done"]
+        return setup_module.DependencyStatus(
+            ready, "" if ready else "нет sounddevice", ready, "" if ready else "нет faster-whisper"
+        )
+
+    monkeypatch.setattr(setup_module, "check_dependencies", fake_check_dependencies)
+    monkeypatch.setattr(setup_module, "recommend_stt_model_size", lambda hw, profile: "tiny")
+
+    class _FakeCompleted:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(*a, **k):
+        installed["done"] = True  # имитирует реальный эффект успешной установки пакетов
+        return _FakeCompleted()
+
+    monkeypatch.setattr(voice_skills.subprocess, "run", fake_run)
+
+    from test_voice_service import FakeSTT
+
+    monkeypatch.setattr("ai_agent.core.voice.service.create_stt_engine", lambda model_size="base": FakeSTT([]))
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+    _wait_for_voice_idle(window, qapp)
+    assert "❌" in window.setup_status_label.text()
+
+    window.agent.skill_context.policy.config.package_install_enabled = True
+    window.agent.skill_context.policy.config.model_download_enabled = True
+    monkeypatch.setattr(window.agent.skill_context.policy, "confirm_callback", lambda action, ctx: True)
+
+    window._on_install_voice_dependencies()
+    _wait_for_voice_idle(window, qapp)
+
+    assert window.agent.voice_settings.stt_model_size == "tiny"
+    assert "✅" in window.install_voice_button.text()

@@ -32,14 +32,24 @@ class VoiceService:
         audio_capture_factory: Callable[[], AudioCapture] | None = None,
         audio_dir: Path | None = None,
         retain_audio: Callable[[], bool] | None = None,
+        input_device: int | str | None = None,
     ) -> None:
         self.store = store
         self.classifier = classifier or TaskClassifier()
         self._stt_factory = stt_factory or (lambda: create_stt_engine())
-        self._audio_capture_factory = audio_capture_factory or (lambda: AudioCapture())
+        # Замыкание на self.input_device, а не на значение аргумента — смена
+        # устройства через set_input_device() применяется к следующей же
+        # записи, без пересборки сервиса (как и retain_audio выше).
+        self._audio_capture_factory = audio_capture_factory or (
+            lambda: AudioCapture(device=self.input_device, level_callback=self._on_level)
+        )
         self._audio_dir = audio_dir
         self._retain_audio = retain_audio or (lambda: False)
         self._stt: Optional[SpeechToText] = None
+        self.input_device = input_device
+        # Живой уровень сигнала микрофона (0..1), обновляется на каждый
+        # фрейм независимо от VAD/распознавания — для индикатора в UI.
+        self.current_level: float = 0.0
 
         self._continuous_thread: threading.Thread | None = None
         self._continuous_capture: AudioCapture | None = None
@@ -53,10 +63,26 @@ class VoiceService:
     def is_continuous_active(self) -> bool:
         return self._continuous_thread is not None and self._continuous_thread.is_alive()
 
+    def _on_level(self, level: float) -> None:
+        self.current_level = level
+
+    def set_input_device(self, device: int | str | None) -> None:
+        self.input_device = device
+
     def _get_stt(self) -> SpeechToText:
         if self._stt is None:
             self._stt = self._stt_factory()
         return self._stt
+
+    def preload_stt(self, model_size: str | None = None) -> SpeechToText:
+        """Явно (пере)загружает STT-движок — используется навыком установки
+        компонентов, чтобы скачивание модели с Hugging Face происходило в
+        явный, подтверждённый пользователем момент, а не незаметно при
+        первой же записи."""
+        if model_size:
+            self._stt_factory = lambda: create_stt_engine(model_size=model_size)
+        self._stt = None
+        return self._get_stt()
 
     def transcribe_file(self, path: Path) -> str:
         return self._get_stt().transcribe_file(path)
@@ -109,6 +135,7 @@ class VoiceService:
         self, max_seconds: float = 30.0, on_utterance: UtteranceCallback | None = None
     ) -> list[Utterance]:
         capture = self._audio_capture_factory()
+        capture.level_callback = self._on_level  # тот же приём, что и в дефолтной фабрике выше
         stt = self._get_stt()
         recording = self.store.start_recording(mode="once")
         results: list[Utterance] = []
@@ -120,6 +147,7 @@ class VoiceService:
                     results.append(utterance)
         finally:
             self.store.stop_recording(recording.id)
+            self.current_level = 0.0
         return results
 
     # ---- постоянная (фоновая) запись -----------------------------------------------
@@ -128,6 +156,7 @@ class VoiceService:
         if self.is_continuous_active:
             return
         capture = self._audio_capture_factory()
+        capture.level_callback = self._on_level
         stt = self._get_stt()
         recording = self.store.start_recording(mode="continuous")
         self._continuous_capture = capture
@@ -152,6 +181,7 @@ class VoiceService:
         self._continuous_thread = None
         self._continuous_capture = None
         self._continuous_recording_id = None
+        self.current_level = 0.0
 
     # ---- задачи и обратная связь ----------------------------------------------------
 

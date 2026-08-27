@@ -9,6 +9,11 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
+from ai_agent.core.autotune import detect_hardware
+
 from .base import Skill, SkillContext, SkillParam, SkillResult, SkillSpec
 from .documents import DOCUMENTS_SUBDIR, _ensure_suffix
 
@@ -251,6 +256,168 @@ class TasksSetReminderSkill(Skill):
         )
 
 
+class VoiceListInputDevicesSkill(Skill):
+    spec = SkillSpec(
+        name="voice.list_input_devices",
+        description="Показать список доступных устройств записи (микрофонов).",
+        parameters=[],
+    )
+
+    def _run(self, context: SkillContext) -> SkillResult:
+        from ai_agent.core.voice.audio import list_input_devices
+
+        try:
+            devices = list_input_devices()
+        except RuntimeError as e:
+            return SkillResult(ok=False, error=str(e))
+
+        if not devices:
+            return SkillResult(ok=True, output="Устройства записи не найдены.", data={"devices": []})
+
+        lines = [
+            f"[{d['index']}] {d['name']}" + (" (по умолчанию)" if d["is_default"] else "") for d in devices
+        ]
+        return SkillResult(ok=True, output="\n".join(lines), data={"devices": devices})
+
+
+class VoiceSetInputDeviceSkill(Skill):
+    spec = SkillSpec(
+        name="voice.set_input_device",
+        description="Выбрать устройство записи (микрофон) по индексу из voice.list_input_devices.",
+        parameters=[
+            SkillParam(
+                "device_index",
+                "integer",
+                "Индекс устройства из voice.list_input_devices; не указано — устройство по умолчанию",
+                required=False,
+            ),
+        ],
+    )
+
+    def _run(self, context: SkillContext, device_index: int | None = None) -> SkillResult:
+        voice = _require_voice(context)
+        voice.set_input_device(device_index)
+        label = str(device_index) if device_index is not None else "по умолчанию"
+        return SkillResult(ok=True, output=f"Устройство записи установлено: {label}", data={"device_index": device_index})
+
+
+class VoiceCheckSetupSkill(Skill):
+    spec = SkillSpec(
+        name="voice.check_setup",
+        description=(
+            "Проверить, установлены ли компоненты диктофона (захват звука и локальное распознавание "
+            "речи), и подобрать размер STT-модели под характеристики текущего ПК. "
+            "Не требует интернета и разрешений."
+        ),
+        parameters=[],
+    )
+
+    def _run(self, context: SkillContext) -> SkillResult:
+        from ai_agent.core.voice.setup import check_dependencies, recommend_stt_model_size
+
+        status = check_dependencies()
+        hw = detect_hardware()
+        recommended = recommend_stt_model_size(hw, context.profile)
+        lines = [
+            "Захват звука: " + ("✅ установлен" if status.audio_ok else f"❌ {status.audio_reason}"),
+            "Распознавание речи: " + ("✅ установлено" if status.stt_ok else f"❌ {status.stt_reason}"),
+            f"Рекомендуемый размер модели под ваш ПК: {recommended} "
+            f"({hw.cpu_cores} ядер, {hw.total_ram_gb} ГБ ОЗУ, GPU: {'есть' if hw.has_gpu else 'нет'})",
+        ]
+        return SkillResult(
+            ok=True,
+            output="\n".join(lines),
+            data={
+                "audio_ok": status.audio_ok,
+                "stt_ok": status.stt_ok,
+                "ready": status.ready,
+                "recommended_model": recommended,
+                "hardware_tier": context.profile.tier,
+            },
+        )
+
+
+class VoiceInstallDependenciesSkill(Skill):
+    spec = SkillSpec(
+        name="voice.install_dependencies",
+        description=(
+            "Скачать и установить пакеты, необходимые для диктофона (sounddevice, webrtcvad, "
+            "faster-whisper), через pip. Требует разрешения пользователя — та же политика, что и "
+            "для установки любых других пакетов (package_install.enabled + подтверждение)."
+        ),
+        parameters=[],
+    )
+
+    def __init__(self, pip_cmd: list[str] | None = None) -> None:
+        self.pip_cmd = pip_cmd or [sys.executable, "-m", "pip"]
+
+    def _run(self, context: SkillContext) -> SkillResult:
+        from ai_agent.core.voice.setup import VOICE_PACKAGES, check_dependencies
+
+        if check_dependencies().ready:
+            return SkillResult(ok=True, output="Компоненты диктофона уже установлены.")
+
+        context.policy.enforce("package.install", package=" ".join(VOICE_PACKAGES))
+
+        try:
+            result = subprocess.run(
+                [*self.pip_cmd, "install", *VOICE_PACKAGES],
+                capture_output=True,
+                text=True,
+                timeout=900,
+            )
+        except subprocess.TimeoutExpired:
+            return SkillResult(ok=False, error="установка компонентов диктофона превысила таймаут")
+
+        if result.returncode != 0:
+            return SkillResult(ok=False, error=result.stderr[-4000:] or "неизвестная ошибка pip")
+
+        return SkillResult(ok=True, output=f"Установлено: {', '.join(VOICE_PACKAGES)}")
+
+
+class VoiceDownloadSttModelSkill(Skill):
+    spec = SkillSpec(
+        name="voice.download_stt_model",
+        description=(
+            "Скачать (если нужно) и загрузить локальную модель распознавания речи (faster-whisper) — "
+            "по умолчанию размер, рекомендованный под характеристики текущего ПК. Требует разрешения "
+            "пользователя — та же политика, что и для скачивания LLM-моделей "
+            "(model_download.enabled + подтверждение)."
+        ),
+        parameters=[
+            SkillParam(
+                "model_size",
+                "string",
+                "Размер модели (tiny/base/small/medium/...); не указано — рекомендация под текущий ПК",
+                required=False,
+            ),
+        ],
+    )
+
+    def _run(self, context: SkillContext, model_size: str = "") -> SkillResult:
+        voice = _require_voice(context)
+
+        if not model_size:
+            from ai_agent.core.voice.setup import recommend_stt_model_size
+
+            model_size = recommend_stt_model_size(detect_hardware(), context.profile)
+
+        context.policy.enforce("model.download", repo_id=f"faster-whisper/{model_size}")
+
+        try:
+            voice.preload_stt(model_size)
+        except RuntimeError as e:
+            return SkillResult(ok=False, error=str(e))
+        except Exception as e:  # ошибка сети/скачивания с Hugging Face
+            return SkillResult(ok=False, error=f"не удалось загрузить STT-модель «{model_size}»: {e}")
+
+        return SkillResult(
+            ok=True,
+            output=f"Модель распознавания речи загружена: {model_size}",
+            data={"model_size": model_size},
+        )
+
+
 def register_voice_skills(registry) -> None:
     registry.register(VoiceRecordOnceSkill())
     registry.register(VoiceStartContinuousSkill())
@@ -261,3 +428,8 @@ def register_voice_skills(registry) -> None:
     registry.register(TasksCreateSkill())
     registry.register(TasksListSkill())
     registry.register(TasksSetReminderSkill())
+    registry.register(VoiceListInputDevicesSkill())
+    registry.register(VoiceSetInputDeviceSkill())
+    registry.register(VoiceCheckSetupSkill())
+    registry.register(VoiceInstallDependenciesSkill())
+    registry.register(VoiceDownloadSttModelSkill())

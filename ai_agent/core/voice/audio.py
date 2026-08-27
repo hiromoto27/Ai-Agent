@@ -9,9 +9,11 @@
 
 from __future__ import annotations
 
+import array
 import queue
 import threading
 import time
+from typing import Callable, Optional
 
 SAMPLE_RATE = 16000
 FRAME_MS = 30  # webrtcvad поддерживает только 10/20/30 мс на фрейм
@@ -29,6 +31,52 @@ def dependencies_available() -> tuple[bool, str]:
     return True, ""
 
 
+def list_input_devices() -> list[dict]:
+    """Перечисляет доступные устройства записи (микрофоны) через PortAudio.
+
+    Каждая запись: index (для передачи в AudioCapture(device=...)), name,
+    channels, default_samplerate, is_default."""
+    ok, reason = dependencies_available()
+    if not ok:
+        raise RuntimeError(reason)
+    import sounddevice as sd
+
+    default = sd.default.device
+    default_input = default[0] if isinstance(default, (list, tuple)) else default
+
+    devices = []
+    for index, info in enumerate(sd.query_devices()):
+        if info.get("max_input_channels", 0) <= 0:
+            continue
+        devices.append(
+            {
+                "index": index,
+                "name": info.get("name", f"Устройство {index}"),
+                "channels": info.get("max_input_channels", 1),
+                "default_samplerate": info.get("default_samplerate", SAMPLE_RATE),
+                "is_default": index == default_input,
+            }
+        )
+    return devices
+
+
+def frame_level(frame: bytes) -> float:
+    """RMS-уровень фрейма PCM 16-bit моно, нормализованный в [0, 1] —
+    используется для живого индикатора шума (не зависит от VAD/речи)."""
+    if not frame:
+        return 0.0
+    samples = array.array("h")
+    try:
+        samples.frombytes(frame[: len(frame) - (len(frame) % 2)])
+    except ValueError:
+        return 0.0
+    if not samples:
+        return 0.0
+    mean_square = sum(s * s for s in samples) / len(samples)
+    rms = mean_square**0.5
+    return min(rms / 32768.0, 1.0)
+
+
 class AudioCapture:
     """Слушает микрофон и режет поток на реплики по паузам речи (VAD).
 
@@ -42,6 +90,8 @@ class AudioCapture:
         sample_rate: int = SAMPLE_RATE,
         aggressiveness: int = 2,
         silence_ms: int = 600,
+        device: int | str | None = None,
+        level_callback: Optional[Callable[[float], None]] = None,
     ) -> None:
         ok, reason = dependencies_available()
         if not ok:
@@ -50,6 +100,11 @@ class AudioCapture:
 
         self.sample_rate = sample_rate
         self.silence_ms = silence_ms
+        self.device = device
+        # Публичный изменяемый атрибут: вызывающий код (VoiceService) может
+        # выставить/поменять его в любой момент — используется для живого
+        # индикатора уровня сигнала независимо от распознавания речи.
+        self.level_callback = level_callback
         self._vad = webrtcvad.Vad(aggressiveness)
         self._stop_event = threading.Event()
 
@@ -72,6 +127,7 @@ class AudioCapture:
             blocksize=frame_len,
             dtype="int16",
             channels=1,
+            device=self.device,
             callback=_callback,
         ):
             while not self._stop_event.is_set():
@@ -81,6 +137,8 @@ class AudioCapture:
                     frame = audio_q.get(timeout=0.5)
                 except queue.Empty:
                     continue
+                if self.level_callback is not None:
+                    self.level_callback(frame_level(frame))
                 if self._vad.is_speech(frame, self.sample_rate):
                     voiced_frames.append(frame)
                     silence_run = 0

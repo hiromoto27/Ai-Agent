@@ -8,9 +8,14 @@ from ai_agent.core.skills.voice import (
     TasksCreateSkill,
     TasksListSkill,
     TasksSetReminderSkill,
+    VoiceCheckSetupSkill,
     VoiceConfirmTaskSkill,
+    VoiceDownloadSttModelSkill,
     VoiceGenerateProtocolSkill,
+    VoiceInstallDependenciesSkill,
+    VoiceListInputDevicesSkill,
     VoiceRecordOnceSkill,
+    VoiceSetInputDeviceSkill,
     VoiceStartContinuousSkill,
     VoiceStopContinuousSkill,
 )
@@ -182,3 +187,168 @@ def test_generate_protocol_creates_docx(tmp_path):
     assert result.ok
     path = context.workspace_root / "documents" / "protocol.docx"
     assert path.exists()
+
+
+# ---- устройства записи -------------------------------------------------------------------
+
+
+def test_list_input_devices_reports_missing_dependencies(monkeypatch, tmp_path):
+    import ai_agent.core.voice.audio as audio_module
+
+    def _raise():
+        raise RuntimeError("sounddevice не установлен (extras: voice)")
+
+    monkeypatch.setattr(audio_module, "list_input_devices", _raise)
+    voice = make_fake_voice(tmp_path, [])
+    context = make_context(tmp_path, voice=voice)
+
+    result = VoiceListInputDevicesSkill().run(context)
+    assert not result.ok
+    assert "sounddevice" in result.error
+
+
+def test_list_input_devices_returns_devices(monkeypatch, tmp_path):
+    import ai_agent.core.voice.audio as audio_module
+
+    devices = [{"index": 0, "name": "Микрофон", "channels": 1, "default_samplerate": 16000.0, "is_default": True}]
+    monkeypatch.setattr(audio_module, "list_input_devices", lambda: devices)
+    voice = make_fake_voice(tmp_path, [])
+    context = make_context(tmp_path, voice=voice)
+
+    result = VoiceListInputDevicesSkill().run(context)
+    assert result.ok
+    assert result.data["devices"] == devices
+
+
+def test_set_input_device_updates_service(tmp_path):
+    voice = make_fake_voice(tmp_path, [])
+    context = make_context(tmp_path, voice=voice)
+
+    result = VoiceSetInputDeviceSkill().run(context, device_index=3)
+    assert result.ok
+    assert voice.input_device == 3
+
+
+def test_set_input_device_without_voice_service_errors(tmp_path):
+    context = make_context(tmp_path, voice=None)
+    result = VoiceSetInputDeviceSkill().run(context, device_index=1)
+    assert not result.ok
+
+
+# ---- установка компонентов -----------------------------------------------------------------
+
+
+def test_check_setup_reports_status_and_recommendation(tmp_path):
+    voice = make_fake_voice(tmp_path, [])
+    context = make_context(tmp_path, voice=voice)
+
+    result = VoiceCheckSetupSkill().run(context)
+    assert result.ok
+    # _TEST_PROFILE.tier == "medium" -> "base" (см. setup.recommend_stt_model_size)
+    assert result.data["recommended_model"] == "base"
+    assert result.data["hardware_tier"] == "medium"
+
+
+def test_install_dependencies_denied_without_policy(tmp_path, monkeypatch):
+    import ai_agent.core.voice.setup as setup_module
+
+    monkeypatch.setattr(setup_module, "check_dependencies", lambda: setup_module.DependencyStatus(False, "x", False, "y"))
+    voice = make_fake_voice(tmp_path, [])
+    context = make_context(tmp_path, voice=voice)  # package_install выключен по умолчанию
+
+    result = VoiceInstallDependenciesSkill().run(context)
+    assert not result.ok
+
+
+def test_install_dependencies_already_ready_short_circuits(tmp_path, monkeypatch):
+    import ai_agent.core.voice.setup as setup_module
+
+    monkeypatch.setattr(setup_module, "check_dependencies", lambda: setup_module.DependencyStatus(True, "", True, ""))
+    voice = make_fake_voice(tmp_path, [])
+    context = make_context(tmp_path, voice=voice)
+
+    result = VoiceInstallDependenciesSkill().run(context)
+    assert result.ok
+    assert "уже установлены" in result.output
+
+
+def test_install_dependencies_runs_pip_with_confirmation(tmp_path, monkeypatch):
+    import ai_agent.core.skills.voice as voice_skills
+    import ai_agent.core.voice.setup as setup_module
+
+    monkeypatch.setattr(setup_module, "check_dependencies", lambda: setup_module.DependencyStatus(False, "x", False, "y"))
+    voice = make_fake_voice(tmp_path, [])
+    context = make_context(tmp_path, voice=voice, confirm_callback=always_allow)
+    context.policy.config.package_install_enabled = True
+
+    calls = []
+
+    class _FakeCompleted:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _FakeCompleted()
+
+    monkeypatch.setattr(voice_skills.subprocess, "run", fake_run)
+
+    result = VoiceInstallDependenciesSkill(pip_cmd=["fake-pip"]).run(context)
+    assert result.ok
+    assert calls[0][:2] == ["fake-pip", "install"]
+
+
+def test_install_dependencies_reports_pip_failure(tmp_path, monkeypatch):
+    import ai_agent.core.skills.voice as voice_skills
+    import ai_agent.core.voice.setup as setup_module
+
+    monkeypatch.setattr(setup_module, "check_dependencies", lambda: setup_module.DependencyStatus(False, "x", False, "y"))
+    voice = make_fake_voice(tmp_path, [])
+    context = make_context(tmp_path, voice=voice, confirm_callback=always_allow)
+    context.policy.config.package_install_enabled = True
+
+    class _FakeFailed:
+        returncode = 1
+        stderr = "боль и страдание"
+
+    monkeypatch.setattr(voice_skills.subprocess, "run", lambda cmd, **kwargs: _FakeFailed())
+
+    result = VoiceInstallDependenciesSkill().run(context)
+    assert not result.ok
+    assert "боль и страдание" in result.error
+
+
+def test_download_stt_model_denied_without_policy(tmp_path):
+    voice = make_fake_voice(tmp_path, [])
+    context = make_context(tmp_path, voice=voice)  # model_download выключен по умолчанию
+
+    result = VoiceDownloadSttModelSkill().run(context)
+    assert not result.ok
+
+
+def test_download_stt_model_uses_recommended_size_and_preloads(tmp_path):
+    voice = make_fake_voice(tmp_path, [])
+    preload_calls = []
+    voice.preload_stt = lambda model_size=None: preload_calls.append(model_size)
+    context = make_context(tmp_path, voice=voice, confirm_callback=always_allow)
+    context.policy.config.model_download_enabled = True
+
+    result = VoiceDownloadSttModelSkill().run(context)
+    assert result.ok
+    assert preload_calls == ["base"]  # _TEST_PROFILE.tier == "medium" -> "base"
+    assert result.data["model_size"] == "base"
+
+
+def test_download_stt_model_reports_load_error(tmp_path):
+    voice = make_fake_voice(tmp_path, [])
+
+    def boom(model_size=None):
+        raise RuntimeError("faster-whisper не установлен (extras: voice)")
+
+    voice.preload_stt = boom
+    context = make_context(tmp_path, voice=voice, confirm_callback=always_allow)
+    context.policy.config.model_download_enabled = True
+
+    result = VoiceDownloadSttModelSkill().run(context)
+    assert not result.ok
+    assert "faster-whisper" in result.error

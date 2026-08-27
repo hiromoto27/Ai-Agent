@@ -11,12 +11,14 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QTabWidget,
     QTextEdit,
@@ -80,6 +82,13 @@ class MainWindow(QMainWindow):
         self.reminder_timer = QTimer(self)
         self.reminder_timer.timeout.connect(self._on_check_reminders)
         self.reminder_timer.start(30_000)
+
+        # Индикатор уровня сигнала микрофона — просто читает текущее
+        # значение VoiceService.current_level (обновляется из фонового
+        # потока записи), без сложной межпоточной сигнализации Qt.
+        self.level_timer = QTimer(self)
+        self.level_timer.timeout.connect(self._on_level_tick)
+        self.level_timer.start(100)
 
     # ---- построение интерфейса --------------------------------------------------
 
@@ -303,36 +312,94 @@ class MainWindow(QMainWindow):
 
     def _build_voice_tab(self) -> QWidget:
         widget = QWidget()
-        layout = QVBoxLayout(widget)
+        outer = QVBoxLayout(widget)
         mic_config = self.agent.skill_context.policy.config
 
-        policy_row = QHBoxLayout()
+        columns = QHBoxLayout()
+        columns.setSpacing(14)
+        left_col = QVBoxLayout()
+        left_col.setSpacing(14)
+        right_col = QVBoxLayout()
+        right_col.setSpacing(14)
+
+        # -- Компоненты диктофона (статус + установка) ------------------------------
+        setup_group = QGroupBox("⚙ Компоненты диктофона")
+        setup_layout = QVBoxLayout(setup_group)
+        self.setup_status_label = QLabel("Проверяю компоненты…")
+        self.setup_status_label.setObjectName("statusLabel")
+        self.setup_status_label.setWordWrap(True)
+        setup_layout.addWidget(self.setup_status_label)
+        install_row = QHBoxLayout()
+        self.install_voice_button = QPushButton("⬇ Установить / обновить компоненты")
+        self.install_voice_button.clicked.connect(self._on_install_voice_dependencies)
+        install_row.addWidget(self.install_voice_button)
+        install_row.addStretch()
+        setup_layout.addLayout(install_row)
+        install_hint = QLabel(
+            "Скачивает пакеты для записи/распознавания речи и модель распознавания под ваш ПК "
+            "(размер подобран автоматически). Требует разрешения на установку пакетов и на "
+            "скачивание моделей — каждое действие спросит подтверждение."
+        )
+        install_hint.setObjectName("statusLabel")
+        install_hint.setWordWrap(True)
+        setup_layout.addWidget(install_hint)
+        left_col.addWidget(setup_group)
+
+        # -- Права доступа к микрофону ------------------------------------------------
+        permissions_group = QGroupBox("🔒 Права доступа к микрофону")
+        permissions_layout = QVBoxLayout(permissions_group)
         self.mic_enabled_checkbox = QCheckBox("Разрешить запись с микрофона")
         self.mic_enabled_checkbox.setChecked(mic_config.microphone_enabled)
         self.mic_enabled_checkbox.toggled.connect(self._on_toggle_mic_enabled)
-        policy_row.addWidget(self.mic_enabled_checkbox)
+        permissions_layout.addWidget(self.mic_enabled_checkbox)
 
         self.mic_continuous_checkbox = QCheckBox("Разрешить постоянную запись")
         self.mic_continuous_checkbox.setChecked(mic_config.microphone_continuous_enabled)
         self.mic_continuous_checkbox.toggled.connect(self._on_toggle_mic_continuous_enabled)
-        policy_row.addWidget(self.mic_continuous_checkbox)
+        permissions_layout.addWidget(self.mic_continuous_checkbox)
 
         self.mic_retain_checkbox = QCheckBox("Сохранять аудиофайлы")
         self.mic_retain_checkbox.setChecked(mic_config.microphone_retain_audio)
         self.mic_retain_checkbox.toggled.connect(self._on_toggle_mic_retain_audio)
-        policy_row.addWidget(self.mic_retain_checkbox)
-        layout.addLayout(policy_row)
+        permissions_layout.addWidget(self.mic_retain_checkbox)
 
         mic_hint = QLabel(
             "Разовая запись работает без переспроса, пока включена галочка выше. Постоянная "
-            "(фоновая) запись при КАЖДОМ включении отдельно спросит подтверждение — пока она "
-            "активна, ниже виден индикатор «🔴 Идёт постоянная запись». По умолчанию сохраняется "
-            "только текст расшифровки, не сами аудиофайлы."
+            "(фоновая) запись при КАЖДОМ включении отдельно спросит подтверждение — риск "
+            "качественно другой: агент слышит всё, что происходит рядом. По умолчанию "
+            "сохраняется только текст расшифровки, не сами аудиофайлы."
         )
         mic_hint.setObjectName("statusLabel")
         mic_hint.setWordWrap(True)
-        layout.addWidget(mic_hint)
+        permissions_layout.addWidget(mic_hint)
+        left_col.addWidget(permissions_group)
 
+        # -- Устройство записи и уровень сигнала --------------------------------------
+        device_group = QGroupBox("🎚 Устройство записи и уровень сигнала")
+        device_layout = QVBoxLayout(device_group)
+        device_row = QHBoxLayout()
+        self.device_combo = QComboBox()
+        self.device_combo.currentIndexChanged.connect(self._on_device_changed)
+        device_row.addWidget(self.device_combo, 1)
+        self.refresh_devices_button = QPushButton("🔄")
+        self.refresh_devices_button.setObjectName("secondary")
+        self.refresh_devices_button.setToolTip("Обновить список устройств")
+        self.refresh_devices_button.clicked.connect(self._on_refresh_input_devices)
+        device_row.addWidget(self.refresh_devices_button)
+        device_layout.addLayout(device_row)
+
+        device_layout.addWidget(QLabel("Уровень сигнала (говорите, чтобы проверить микрофон):"))
+        self.level_meter = QProgressBar()
+        self.level_meter.setRange(0, 100)
+        self.level_meter.setValue(0)
+        self.level_meter.setTextVisible(False)
+        device_layout.addWidget(self.level_meter)
+        left_col.addWidget(device_group)
+        left_col.addStretch()
+
+        # -- Запись --------------------------------------------------------------------
+        record_group = QGroupBox("🎙 Запись")
+        record_layout = QVBoxLayout(record_group)
         record_row = QHBoxLayout()
         self.record_once_button = QPushButton("🎙 Разовая запись")
         self.record_once_button.clicked.connect(self._on_record_once)
@@ -341,13 +408,16 @@ class MainWindow(QMainWindow):
         self.continuous_button = QPushButton("⏺ Включить постоянную запись")
         self.continuous_button.clicked.connect(self._on_toggle_continuous)
         record_row.addWidget(self.continuous_button)
-        layout.addLayout(record_row)
+        record_layout.addLayout(record_row)
 
         self.continuous_status_label = QLabel("Постоянная запись выключена.")
         self.continuous_status_label.setObjectName("statusLabel")
-        layout.addWidget(self.continuous_status_label)
+        record_layout.addWidget(self.continuous_status_label)
+        right_col.addWidget(record_group)
 
-        layout.addWidget(QLabel("Задачи (реплики диктофона классифицируются по контекстным словам):"))
+        # -- Задачи ----------------------------------------------------------------------
+        tasks_group = QGroupBox("🗂 Задачи (классификация по контекстным словам)")
+        tasks_layout = QVBoxLayout(tasks_group)
         task_row = QHBoxLayout()
         self.new_task_title_input = QLineEdit()
         self.new_task_title_input.setPlaceholderText("Название задачи")
@@ -358,14 +428,14 @@ class MainWindow(QMainWindow):
         self.create_task_button = QPushButton("+ Задача")
         self.create_task_button.clicked.connect(self._on_create_task)
         task_row.addWidget(self.create_task_button)
-        layout.addLayout(task_row)
+        tasks_layout.addLayout(task_row)
 
         self.tasks_list = QListWidget()
         self.tasks_list.setMaximumHeight(100)
-        layout.addWidget(self.tasks_list)
+        tasks_layout.addWidget(self.tasks_list)
 
         reminder_row = QHBoxLayout()
-        reminder_row.addWidget(QLabel("Напомнить о выбранной задаче через (минут):"))
+        reminder_row.addWidget(QLabel("Напомнить через (минут):"))
         self.reminder_minutes_input = QLineEdit("60")
         self.reminder_minutes_input.setFixedWidth(60)
         reminder_row.addWidget(self.reminder_minutes_input)
@@ -373,11 +443,15 @@ class MainWindow(QMainWindow):
         self.set_reminder_button.clicked.connect(self._on_set_reminder)
         reminder_row.addWidget(self.set_reminder_button)
         reminder_row.addStretch()
-        layout.addLayout(reminder_row)
+        tasks_layout.addLayout(reminder_row)
+        right_col.addWidget(tasks_group)
 
-        layout.addWidget(QLabel("Реплики (выберите реплику и задачу, чтобы подтвердить/отклонить принадлежность):"))
+        # -- Реплики -----------------------------------------------------------------------
+        utterances_group = QGroupBox("💬 Реплики")
+        utterances_layout = QVBoxLayout(utterances_group)
+        utterances_layout.addWidget(QLabel("Выберите реплику и задачу, чтобы подтвердить/отклонить принадлежность:"))
         self.utterances_list = QListWidget()
-        layout.addWidget(self.utterances_list, 1)
+        utterances_layout.addWidget(self.utterances_list, 1)
 
         confirm_row = QHBoxLayout()
         self.confirm_task_combo = QComboBox()
@@ -389,22 +463,30 @@ class MainWindow(QMainWindow):
         self.confirm_no_button.setObjectName("secondary")
         self.confirm_no_button.clicked.connect(lambda: self._on_confirm_utterance(False))
         confirm_row.addWidget(self.confirm_no_button)
-        layout.addLayout(confirm_row)
+        utterances_layout.addLayout(confirm_row)
+        right_col.addWidget(utterances_group, 1)
 
+        # -- Протокол --------------------------------------------------------------------
         protocol_row = QHBoxLayout()
         self.generate_protocol_button = QPushButton("📝 Сформировать протокол")
         self.generate_protocol_button.clicked.connect(self._on_generate_protocol)
         protocol_row.addWidget(self.generate_protocol_button)
         protocol_row.addStretch()
-        layout.addLayout(protocol_row)
+        right_col.addLayout(protocol_row)
+
+        columns.addLayout(left_col, 1)
+        columns.addLayout(right_col, 2)
+        outer.addLayout(columns, 1)
 
         self.voice_status_label = QLabel("")
         self.voice_status_label.setObjectName("statusLabel")
         self.voice_status_label.setWordWrap(True)
-        layout.addWidget(self.voice_status_label)
+        outer.addWidget(self.voice_status_label)
 
         self._refresh_tasks_and_utterances()
         self._refresh_continuous_status()
+        self._on_check_voice_setup()
+        self._on_refresh_input_devices()
         return widget
 
     def _build_models_tab(self) -> QWidget:
@@ -996,7 +1078,13 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _set_voice_busy(self, busy: bool) -> None:
-        for w in (self.record_once_button, self.create_task_button, self.set_reminder_button):
+        for w in (
+            self.record_once_button,
+            self.create_task_button,
+            self.set_reminder_button,
+            self.install_voice_button,
+            self.refresh_devices_button,
+        ):
             w.setEnabled(not busy)
 
     def _on_record_once(self) -> None:
@@ -1101,3 +1189,78 @@ class MainWindow(QMainWindow):
             self.chat_log.append(
                 theme.system_message_html(f"⏰ Напоминание по задаче «{due.task.title}»: {due.reminder.message}")
             )
+
+    def _on_level_tick(self) -> None:
+        voice = self.agent.skill_context.voice
+        level = voice.current_level if voice is not None else 0.0
+        level = min(max(level, 0.0), 1.0)
+        self.level_meter.setValue(int(level * 100))
+        color = theme.level_meter_color(level)
+        self.level_meter.setStyleSheet(f"QProgressBar::chunk {{ background-color: {color}; border-radius: 6px; }}")
+
+    def _on_refresh_input_devices(self) -> None:
+        self._run_voice_skill("voice.list_input_devices", {}, self._on_input_devices_listed)
+
+    def _on_input_devices_listed(self, result: SkillResult) -> None:
+        self.device_combo.blockSignals(True)
+        self.device_combo.clear()
+        self.device_combo.addItem("Устройство по умолчанию", None)
+        if result.ok:
+            for d in result.data.get("devices", []):
+                label = d["name"] + (" (по умолчанию)" if d["is_default"] else "")
+                self.device_combo.addItem(label, d["index"])
+            settings = getattr(self.agent, "voice_settings", None)
+            selected = settings.input_device if settings is not None else None
+            idx = self.device_combo.findData(selected)
+            self.device_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            if len(result.data.get("devices", [])) == 0:
+                self.voice_status_label.setText("Устройства записи не найдены.")
+        else:
+            self.voice_status_label.setText(f"Не удалось получить список микрофонов: {result.error}")
+        self.device_combo.blockSignals(False)
+
+    def _on_device_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        device_index = self.device_combo.itemData(index)
+        voice = self.agent.skill_context.voice
+        if voice is not None:
+            voice.set_input_device(device_index)
+        settings = getattr(self.agent, "voice_settings", None)
+        if settings is not None:
+            settings.input_device = device_index
+            settings.save(self.agent.voice_settings_path)
+
+    def _on_check_voice_setup(self) -> None:
+        self._run_voice_skill("voice.check_setup", {}, self._on_voice_setup_checked)
+
+    def _on_voice_setup_checked(self, result: SkillResult) -> None:
+        if not result.ok:
+            self.setup_status_label.setText(f"Не удалось проверить компоненты: {result.error}")
+            return
+        self.setup_status_label.setText(result.output)
+        if result.data.get("ready"):
+            self.install_voice_button.setText("✅ Компоненты установлены (переустановить)")
+        else:
+            self.install_voice_button.setText("⬇ Установить / обновить компоненты")
+
+    def _on_install_voice_dependencies(self) -> None:
+        self.voice_status_label.setText("Устанавливаю компоненты диктофона…")
+        self._run_voice_skill("voice.install_dependencies", {}, self._on_voice_dependencies_installed)
+
+    def _on_voice_dependencies_installed(self, result: SkillResult) -> None:
+        if not result.ok:
+            self.voice_status_label.setText(f"Ошибка установки: {result.error}")
+            return
+        self.voice_status_label.setText(f"{result.output} Загружаю модель распознавания речи под ваш ПК…")
+        self._run_voice_skill("voice.download_stt_model", {}, self._on_voice_stt_model_downloaded)
+
+    def _on_voice_stt_model_downloaded(self, result: SkillResult) -> None:
+        if result.ok:
+            settings = getattr(self.agent, "voice_settings", None)
+            model_size = result.data.get("model_size", "")
+            if settings is not None and model_size:
+                settings.stt_model_size = model_size
+                settings.save(self.agent.voice_settings_path)
+        self._on_voice_action_done(result)
+        self._on_check_voice_setup()
