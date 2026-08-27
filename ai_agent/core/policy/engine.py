@@ -58,6 +58,13 @@ class PolicyConfig:
     network_deny_domains: list[str] = field(default_factory=list)
     package_install_enabled: bool = False
     model_download_enabled: bool = False
+    # Разовая запись — как остальные навыки: включил здесь один раз, дальше
+    # работает без переспроса. Постоянная (фоновая) запись — отдельный, более
+    # строгий флаг: подтверждение запрашивается при КАЖДОМ включении режима
+    # (см. PolicyEngine.check_microphone), а не через confirmation_required_for.
+    microphone_enabled: bool = False
+    microphone_continuous_enabled: bool = False
+    microphone_retain_audio: bool = False
     confirmation_required_for: list[str] = field(
         default_factory=lambda: [
             "shell.execute",
@@ -85,6 +92,7 @@ class PolicyConfig:
         network = raw.get("network", {})
         package_install = raw.get("package_install", {})
         model_download = raw.get("model_download", {})
+        microphone = raw.get("microphone", {})
         return cls(
             workspace_only=raw.get("workspace_only", True),
             filesystem_allow_read=fs.get("allow_read", []),
@@ -99,6 +107,9 @@ class PolicyConfig:
             network_deny_domains=network.get("deny_domains", []),
             package_install_enabled=package_install.get("enabled", False),
             model_download_enabled=model_download.get("enabled", False),
+            microphone_enabled=microphone.get("enabled", False),
+            microphone_continuous_enabled=microphone.get("continuous_enabled", False),
+            microphone_retain_audio=microphone.get("retain_audio", False),
             confirmation_required_for=raw.get(
                 "confirmation_required_for", cls().confirmation_required_for
             ),
@@ -130,6 +141,11 @@ class PolicyConfig:
             },
             "package_install": {"enabled": self.package_install_enabled},
             "model_download": {"enabled": self.model_download_enabled},
+            "microphone": {
+                "enabled": self.microphone_enabled,
+                "continuous_enabled": self.microphone_continuous_enabled,
+                "retain_audio": self.microphone_retain_audio,
+            },
             "confirmation_required_for": self.confirmation_required_for,
             "audit_log": self.audit_log,
         }
@@ -259,6 +275,22 @@ class PolicyEngine:
         requires_confirmation = "model.download" in self.config.confirmation_required_for
         return PolicyDecision(True, requires_confirmation=requires_confirmation)
 
+    def check_microphone(self, continuous: bool) -> PolicyDecision:
+        if continuous:
+            if not self.config.microphone_continuous_enabled:
+                return PolicyDecision(
+                    False, reason="постоянная запись микрофона отключена (microphone.continuous_enabled=false)"
+                )
+            # Риск постоянной записи качественно другой (агент слышит всё,
+            # что происходит рядом, а не только явно надиктованное) — в
+            # отличие от разовой записи, подтверждение запрашивается ВСЕГДА
+            # при включении режима, а не по списку confirmation_required_for.
+            return PolicyDecision(True, requires_confirmation=True)
+        if not self.config.microphone_enabled:
+            return PolicyDecision(False, reason="доступ к микрофону отключён (microphone.enabled=false)")
+        requires_confirmation = "mic.record" in self.config.confirmation_required_for
+        return PolicyDecision(True, requires_confirmation=requires_confirmation)
+
     # ---- единая точка входа для навыков ------------------------------------------
 
     def enforce(self, action: str, **context) -> None:
@@ -291,6 +323,10 @@ class PolicyEngine:
             return self.check_package_install(context.get("package", ""))
         if action == "model.download":
             return self.check_model_download()
+        if action == "mic.record":
+            return self.check_microphone(continuous=False)
+        if action == "mic.continuous_start":
+            return self.check_microphone(continuous=True)
         return PolicyDecision(False, reason=f"неизвестное действие: {action}")
 
     def _audit(self, action: str, context: dict, decision: PolicyDecision, confirmed: Optional[bool]) -> None:

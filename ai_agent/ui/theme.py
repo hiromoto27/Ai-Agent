@@ -27,6 +27,7 @@ TAB_TITLES = {
     "memory": "🧠  Память",
     "permissions": "🔒  Права доступа",
     "models": "🤗  Модели",
+    "voice": "🎙  Диктофон",
 }
 
 STYLESHEET = f"""

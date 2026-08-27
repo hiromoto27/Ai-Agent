@@ -1,10 +1,11 @@
-"""Главное окно десктоп-приложения (чат, навыки, память, права доступа, модели)."""
+"""Главное окно десктоп-приложения (чат, навыки, память, права доступа, модели, диктофон)."""
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
-from PySide6.QtCore import QUrl, Qt
+from PySide6.QtCore import QTimer, QUrl, Qt
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -27,6 +28,7 @@ from ai_agent.app import build_agent, build_llm_provider_safe, combine_system_pr
 from ai_agent.core.orchestrator import AgentResult, DEFAULT_SYSTEM_PROMPT
 from ai_agent.core.skills.base import SkillResult
 from ai_agent.core.skills.models import hf_login_status
+from ai_agent.core.voice.reminders import ReminderChecker
 
 from . import theme
 from .confirm_bridge import ConfirmBridge
@@ -67,7 +69,17 @@ class MainWindow(QMainWindow):
         self._models_busy_count = 0
         self._llm_test_worker: LLMConnectionTestWorker | None = None
         self._lmstudio_models_worker: LMStudioModelsWorker | None = None
+        self._voice_workers: list[SkillWorker] = []
+        self._voice_busy_count = 0
+        self._reminder_checker = ReminderChecker(self.agent.skill_context.voice.store)
         self._build_ui()
+
+        # Напоминания по задачам работают, только пока приложение открыто
+        # (см. VOICE_RECORDER_PLAN.md, раздел 7) — таймер проверяет их
+        # раз в 30 секунд.
+        self.reminder_timer = QTimer(self)
+        self.reminder_timer.timeout.connect(self._on_check_reminders)
+        self.reminder_timer.start(30_000)
 
     # ---- построение интерфейса --------------------------------------------------
 
@@ -79,6 +91,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_skills_tab(), theme.TAB_TITLES["skills"])
         tabs.addTab(self._build_memory_tab(), theme.TAB_TITLES["memory"])
         tabs.addTab(self._build_permissions_tab(), theme.TAB_TITLES["permissions"])
+        tabs.addTab(self._build_voice_tab(), theme.TAB_TITLES["voice"])
         self.setCentralWidget(tabs)
 
     def _build_chat_tab(self) -> QWidget:
@@ -286,6 +299,112 @@ class MainWindow(QMainWindow):
             "Действия, требующие подтверждения, покажут диалог во время выполнения задачи."
         )
         layout.addWidget(view)
+        return widget
+
+    def _build_voice_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        mic_config = self.agent.skill_context.policy.config
+
+        policy_row = QHBoxLayout()
+        self.mic_enabled_checkbox = QCheckBox("Разрешить запись с микрофона")
+        self.mic_enabled_checkbox.setChecked(mic_config.microphone_enabled)
+        self.mic_enabled_checkbox.toggled.connect(self._on_toggle_mic_enabled)
+        policy_row.addWidget(self.mic_enabled_checkbox)
+
+        self.mic_continuous_checkbox = QCheckBox("Разрешить постоянную запись")
+        self.mic_continuous_checkbox.setChecked(mic_config.microphone_continuous_enabled)
+        self.mic_continuous_checkbox.toggled.connect(self._on_toggle_mic_continuous_enabled)
+        policy_row.addWidget(self.mic_continuous_checkbox)
+
+        self.mic_retain_checkbox = QCheckBox("Сохранять аудиофайлы")
+        self.mic_retain_checkbox.setChecked(mic_config.microphone_retain_audio)
+        self.mic_retain_checkbox.toggled.connect(self._on_toggle_mic_retain_audio)
+        policy_row.addWidget(self.mic_retain_checkbox)
+        layout.addLayout(policy_row)
+
+        mic_hint = QLabel(
+            "Разовая запись работает без переспроса, пока включена галочка выше. Постоянная "
+            "(фоновая) запись при КАЖДОМ включении отдельно спросит подтверждение — пока она "
+            "активна, ниже виден индикатор «🔴 Идёт постоянная запись». По умолчанию сохраняется "
+            "только текст расшифровки, не сами аудиофайлы."
+        )
+        mic_hint.setObjectName("statusLabel")
+        mic_hint.setWordWrap(True)
+        layout.addWidget(mic_hint)
+
+        record_row = QHBoxLayout()
+        self.record_once_button = QPushButton("🎙 Разовая запись")
+        self.record_once_button.clicked.connect(self._on_record_once)
+        record_row.addWidget(self.record_once_button)
+
+        self.continuous_button = QPushButton("⏺ Включить постоянную запись")
+        self.continuous_button.clicked.connect(self._on_toggle_continuous)
+        record_row.addWidget(self.continuous_button)
+        layout.addLayout(record_row)
+
+        self.continuous_status_label = QLabel("Постоянная запись выключена.")
+        self.continuous_status_label.setObjectName("statusLabel")
+        layout.addWidget(self.continuous_status_label)
+
+        layout.addWidget(QLabel("Задачи (реплики диктофона классифицируются по контекстным словам):"))
+        task_row = QHBoxLayout()
+        self.new_task_title_input = QLineEdit()
+        self.new_task_title_input.setPlaceholderText("Название задачи")
+        task_row.addWidget(self.new_task_title_input, 1)
+        self.new_task_desc_input = QLineEdit()
+        self.new_task_desc_input.setPlaceholderText("Описание/контекст (для первичной классификации)")
+        task_row.addWidget(self.new_task_desc_input, 1)
+        self.create_task_button = QPushButton("+ Задача")
+        self.create_task_button.clicked.connect(self._on_create_task)
+        task_row.addWidget(self.create_task_button)
+        layout.addLayout(task_row)
+
+        self.tasks_list = QListWidget()
+        self.tasks_list.setMaximumHeight(100)
+        layout.addWidget(self.tasks_list)
+
+        reminder_row = QHBoxLayout()
+        reminder_row.addWidget(QLabel("Напомнить о выбранной задаче через (минут):"))
+        self.reminder_minutes_input = QLineEdit("60")
+        self.reminder_minutes_input.setFixedWidth(60)
+        reminder_row.addWidget(self.reminder_minutes_input)
+        self.set_reminder_button = QPushButton("⏰ Поставить напоминание")
+        self.set_reminder_button.clicked.connect(self._on_set_reminder)
+        reminder_row.addWidget(self.set_reminder_button)
+        reminder_row.addStretch()
+        layout.addLayout(reminder_row)
+
+        layout.addWidget(QLabel("Реплики (выберите реплику и задачу, чтобы подтвердить/отклонить принадлежность):"))
+        self.utterances_list = QListWidget()
+        layout.addWidget(self.utterances_list, 1)
+
+        confirm_row = QHBoxLayout()
+        self.confirm_task_combo = QComboBox()
+        confirm_row.addWidget(self.confirm_task_combo, 1)
+        self.confirm_yes_button = QPushButton("✔ Относится")
+        self.confirm_yes_button.clicked.connect(lambda: self._on_confirm_utterance(True))
+        confirm_row.addWidget(self.confirm_yes_button)
+        self.confirm_no_button = QPushButton("✘ Не относится")
+        self.confirm_no_button.setObjectName("secondary")
+        self.confirm_no_button.clicked.connect(lambda: self._on_confirm_utterance(False))
+        confirm_row.addWidget(self.confirm_no_button)
+        layout.addLayout(confirm_row)
+
+        protocol_row = QHBoxLayout()
+        self.generate_protocol_button = QPushButton("📝 Сформировать протокол")
+        self.generate_protocol_button.clicked.connect(self._on_generate_protocol)
+        protocol_row.addWidget(self.generate_protocol_button)
+        protocol_row.addStretch()
+        layout.addLayout(protocol_row)
+
+        self.voice_status_label = QLabel("")
+        self.voice_status_label.setObjectName("statusLabel")
+        self.voice_status_label.setWordWrap(True)
+        layout.addWidget(self.voice_status_label)
+
+        self._refresh_tasks_and_utterances()
+        self._refresh_continuous_status()
         return widget
 
     def _build_models_tab(self) -> QWidget:
@@ -835,3 +954,150 @@ class MainWindow(QMainWindow):
             self.test_hf_button,
         ):
             w.setEnabled(not busy)
+
+    # ---- обработчики: диктофон -------------------------------------------------------
+
+    def _on_toggle_mic_enabled(self, checked: bool) -> None:
+        self.agent.skill_context.policy.config.microphone_enabled = checked
+        self.agent.skill_context.policy.config.save(self._policy_path)
+
+    def _on_toggle_mic_continuous_enabled(self, checked: bool) -> None:
+        self.agent.skill_context.policy.config.microphone_continuous_enabled = checked
+        self.agent.skill_context.policy.config.save(self._policy_path)
+
+    def _on_toggle_mic_retain_audio(self, checked: bool) -> None:
+        self.agent.skill_context.policy.config.microphone_retain_audio = checked
+        self.agent.skill_context.policy.config.save(self._policy_path)
+
+    def _run_voice_skill(self, name: str, kwargs: dict, on_done) -> None:
+        """Как _run_model_skill: несколько таких вызовов могут идти
+        параллельно, поэтому кнопки разблокируются по счётчику."""
+        self._voice_busy_count += 1
+        self._set_voice_busy(True)
+
+        worker = SkillWorker(self.agent.skills, self.agent.skill_context, name, kwargs, parent=self)
+
+        def _on_finished_skill(result: SkillResult) -> None:
+            self._voice_busy_count = max(0, self._voice_busy_count - 1)
+            if self._voice_busy_count == 0:
+                self._set_voice_busy(False)
+            on_done(result)
+
+        def _on_failed(message: str) -> None:
+            self._voice_busy_count = max(0, self._voice_busy_count - 1)
+            if self._voice_busy_count == 0:
+                self._set_voice_busy(False)
+            self.voice_status_label.setText(f"Ошибка: {message}")
+
+        worker.finished_skill.connect(_on_finished_skill)
+        worker.failed.connect(_on_failed)
+        self._voice_workers.append(worker)
+        worker.finished.connect(lambda: self._voice_workers.remove(worker) if worker in self._voice_workers else None)
+        worker.start()
+
+    def _set_voice_busy(self, busy: bool) -> None:
+        for w in (self.record_once_button, self.create_task_button, self.set_reminder_button):
+            w.setEnabled(not busy)
+
+    def _on_record_once(self) -> None:
+        self.voice_status_label.setText("Запись… (остановится по паузе в речи или через 30 секунд).")
+        self._run_voice_skill("voice.record_once", {"max_seconds": 30.0}, self._on_voice_action_done)
+
+    def _on_toggle_continuous(self) -> None:
+        voice = self.agent.skill_context.voice
+        active = voice is not None and voice.is_continuous_active
+        skill = "voice.stop_continuous" if active else "voice.start_continuous"
+        self._run_voice_skill(skill, {}, self._on_voice_action_done)
+
+    def _on_create_task(self) -> None:
+        title = self.new_task_title_input.text().strip()
+        if not title:
+            self.voice_status_label.setText("Введите название задачи.")
+            return
+        description = self.new_task_desc_input.text().strip()
+        self._run_voice_skill(
+            "tasks.create", {"title": title, "description": description}, self._on_task_created_done
+        )
+
+    def _on_task_created_done(self, result: SkillResult) -> None:
+        if result.ok:
+            self.new_task_title_input.clear()
+            self.new_task_desc_input.clear()
+        self._on_voice_action_done(result)
+
+    def _on_set_reminder(self) -> None:
+        task_index = self.confirm_task_combo.currentIndex()
+        if task_index < 0:
+            self.voice_status_label.setText("Сначала создайте и выберите задачу в списке ниже.")
+            return
+        task_id = self.confirm_task_combo.itemData(task_index)
+        try:
+            minutes = float(self.reminder_minutes_input.text().strip())
+        except ValueError:
+            self.voice_status_label.setText("Введите число минут для напоминания.")
+            return
+        fire_at = time.time() + minutes * 60
+        self._run_voice_skill(
+            "tasks.set_reminder", {"task_id": task_id, "fire_at": fire_at}, self._on_voice_action_done
+        )
+
+    def _on_confirm_utterance(self, belongs: bool) -> None:
+        utterance_item = self.utterances_list.currentItem()
+        task_index = self.confirm_task_combo.currentIndex()
+        if utterance_item is None or task_index < 0:
+            self.voice_status_label.setText("Выберите реплику в списке и задачу в выпадающем списке.")
+            return
+        utterance_id = utterance_item.data(Qt.UserRole)
+        task_id = self.confirm_task_combo.itemData(task_index)
+        self._run_voice_skill(
+            "voice.confirm_task",
+            {"utterance_id": utterance_id, "task_id": task_id, "belongs": belongs},
+            self._on_voice_action_done,
+        )
+
+    def _on_generate_protocol(self) -> None:
+        self._run_voice_skill("voice.generate_protocol", {"filename": "protocol.docx"}, self._on_voice_action_done)
+
+    def _on_voice_action_done(self, result: SkillResult) -> None:
+        self.voice_status_label.setText(result.output if result.ok else f"Ошибка: {result.error}")
+        self._refresh_tasks_and_utterances()
+        self._refresh_continuous_status()
+
+    def _refresh_continuous_status(self) -> None:
+        voice = self.agent.skill_context.voice
+        active = voice is not None and voice.is_continuous_active
+        if active:
+            self.continuous_status_label.setText("🔴 Идёт постоянная запись.")
+            self.continuous_button.setText("⏹ Выключить постоянную запись")
+        else:
+            self.continuous_status_label.setText("Постоянная запись выключена.")
+            self.continuous_button.setText("⏺ Включить постоянную запись")
+
+    def _refresh_tasks_and_utterances(self) -> None:
+        voice = self.agent.skill_context.voice
+        self.tasks_list.clear()
+        self.confirm_task_combo.clear()
+        self.utterances_list.clear()
+        if voice is None:
+            return
+
+        for task in voice.store.list_tasks():
+            profile = voice.classifier.profiles.get(task.id)
+            confidence = f"{profile.confidence:.0%}" if profile else "—"
+            self.tasks_list.addItem(f"#{task.id} «{task.title}» — уверенность классификатора: {confidence}")
+            self.confirm_task_combo.addItem(f"#{task.id} «{task.title}»", task.id)
+
+        for utterance in voice.store.list_utterances()[-50:]:
+            label = utterance.text + (f" → задача #{utterance.task_id}" if utterance.task_id else " → не отнесено")
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, utterance.id)
+            self.utterances_list.addItem(item)
+
+    def _on_check_reminders(self) -> None:
+        voice = self.agent.skill_context.voice
+        if voice is None:
+            return
+        for due in self._reminder_checker.check():
+            self.chat_log.append(
+                theme.system_message_html(f"⏰ Напоминание по задаче «{due.task.title}»: {due.reminder.message}")
+            )

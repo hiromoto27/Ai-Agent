@@ -184,3 +184,68 @@ def test_config_load_missing_file_returns_default(tmp_path):
     config = PolicyConfig.load(tmp_path / "does-not-exist.yaml")
     assert config.shell_enabled is False
     assert config.workspace_only is True
+
+
+def test_microphone_record_disabled_by_default(tmp_path):
+    engine, _ = make_engine(tmp_path)
+    with pytest.raises(PermissionDenied):
+        engine.enforce("mic.record")
+
+
+def test_microphone_record_enabled_does_not_require_confirmation_each_time(tmp_path):
+    engine, _ = make_engine(tmp_path, microphone_enabled=True)
+    engine.confirm_callback = always_deny  # даже отказ подтверждений не должен мешать
+    engine.enforce("mic.record")  # не должно бросить исключение
+
+
+def test_microphone_continuous_disabled_by_default(tmp_path):
+    engine, _ = make_engine(tmp_path)
+    with pytest.raises(PermissionDenied):
+        engine.enforce("mic.continuous_start")
+
+
+def test_microphone_continuous_enabled_still_requires_confirmation(tmp_path):
+    engine, _ = make_engine(tmp_path, microphone_continuous_enabled=True)
+    engine.confirm_callback = always_deny
+    with pytest.raises(PermissionDenied):
+        engine.enforce("mic.continuous_start")
+
+    engine.confirm_callback = always_allow
+    engine.enforce("mic.continuous_start")
+
+
+def test_microphone_continuous_requires_confirmation_on_every_call(tmp_path):
+    """В отличие от остальных действий из confirmation_required_for,
+    постоянная запись переспрашивает КАЖДЫЙ раз — это не разовая настройка."""
+    engine, _ = make_engine(tmp_path, microphone_continuous_enabled=True)
+    calls = []
+
+    def counting_confirm(action, ctx):
+        calls.append(action)
+        return True
+
+    engine.confirm_callback = counting_confirm
+    engine.enforce("mic.continuous_start")
+    engine.enforce("mic.continuous_start")
+    assert calls == ["mic.continuous_start", "mic.continuous_start"]
+
+
+def test_microphone_config_roundtrip(tmp_path):
+    path = tmp_path / "policy.yaml"
+    config = PolicyConfig.default()
+    config.microphone_enabled = True
+    config.microphone_continuous_enabled = True
+    config.microphone_retain_audio = True
+    config.save(path)
+
+    loaded = PolicyConfig.load(path)
+    assert loaded.microphone_enabled is True
+    assert loaded.microphone_continuous_enabled is True
+    assert loaded.microphone_retain_audio is True
+
+
+def test_microphone_config_defaults_are_off(tmp_path):
+    config = PolicyConfig.load(tmp_path / "does-not-exist.yaml")
+    assert config.microphone_enabled is False
+    assert config.microphone_continuous_enabled is False
+    assert config.microphone_retain_audio is False

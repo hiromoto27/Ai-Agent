@@ -176,6 +176,17 @@ def test_llm_connection_failure_on_empty_response():
     assert "пустым" in message
 
 
+def test_build_agent_wires_voice_service(tmp_path: Path):
+    from ai_agent.core.voice.service import VoiceService
+
+    agent = app.build_agent(state_dir=tmp_path / "state", workspace_root=tmp_path / "ws")
+
+    assert isinstance(agent.skill_context.voice, VoiceService)
+    assert (tmp_path / "ws" / "recordings").is_dir()
+    assert agent.skills.has("voice.record_once")
+    assert agent.skills.has("tasks.create")
+
+
 def test_build_agent_combines_custom_system_prompt(tmp_path: Path):
     from ai_agent.core.llm_settings import LLMSettings
     from ai_agent.core.orchestrator import DEFAULT_SYSTEM_PROMPT

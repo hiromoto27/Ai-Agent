@@ -67,16 +67,25 @@ def _wait_for_lmstudio_models(window, app, timeout_ms=5000):
     app.processEvents()
 
 
+def _wait_for_voice_idle(window, app, timeout_ms=5000):
+    start = time.monotonic()
+    while window._voice_busy_count > 0:
+        app.processEvents()
+        if (time.monotonic() - start) * 1000 > timeout_ms:
+            raise TimeoutError("voice tab did not finish in time")
+    app.processEvents()
+
+
 def _make_window(tmp_path: Path) -> MainWindow:
     window = MainWindow(state_dir=tmp_path / "state", workspace_root=tmp_path / "ws")
     return window
 
 
-def test_main_window_builds_with_six_tabs(qapp, tmp_path: Path):
+def test_main_window_builds_with_seven_tabs(qapp, tmp_path: Path):
     window = _make_window(tmp_path)
     _wait_for_models_idle(window, qapp)
     tabs = window.centralWidget()
-    assert tabs.count() == 6
+    assert tabs.count() == 7
     titles = [tabs.tabText(i) for i in range(tabs.count())]
     assert titles == [
         theme.TAB_TITLES["chat"],
@@ -85,6 +94,7 @@ def test_main_window_builds_with_six_tabs(qapp, tmp_path: Path):
         theme.TAB_TITLES["skills"],
         theme.TAB_TITLES["memory"],
         theme.TAB_TITLES["permissions"],
+        theme.TAB_TITLES["voice"],
     ]
 
 
@@ -719,3 +729,157 @@ def test_new_chat_button_clears_conversation(qapp, tmp_path: Path):
 
     assert window.agent.conversation == []
     assert window.chat_log.toPlainText().strip() == ""
+
+
+# ---- вкладка «Диктофон» --------------------------------------------------------------
+
+
+def test_voice_tab_widgets_present(qapp, tmp_path: Path):
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    for widget in (
+        window.mic_enabled_checkbox,
+        window.mic_continuous_checkbox,
+        window.mic_retain_checkbox,
+        window.record_once_button,
+        window.continuous_button,
+        window.tasks_list,
+        window.utterances_list,
+        window.confirm_task_combo,
+        window.generate_protocol_button,
+    ):
+        assert widget is not None
+    assert window.continuous_status_label.text() == "Постоянная запись выключена."
+
+
+def test_voice_tab_create_task_appears_in_list(qapp, tmp_path: Path):
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    window.new_task_title_input.setText("Согласовать бюджет")
+    window.new_task_desc_input.setText("Финансовый план на квартал")
+    window._on_create_task()
+    _wait_for_voice_idle(window, qapp)
+
+    assert window.tasks_list.count() == 1
+    assert "Согласовать бюджет" in window.tasks_list.item(0).text()
+    assert window.confirm_task_combo.count() == 1
+    assert window.new_task_title_input.text() == ""  # поле очищается после успеха
+
+
+def test_voice_tab_record_once_without_dependencies_reports_error(qapp, tmp_path: Path):
+    """sounddevice/webrtcvad (extras: voice) не установлены в тестовом
+    окружении — навык должен вернуть понятную ошибку, а не уронить GUI."""
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    window.mic_enabled_checkbox.setChecked(True)
+    window._on_record_once()
+    _wait_for_voice_idle(window, qapp)
+
+    assert "Ошибка" in window.voice_status_label.text()
+
+
+def test_voice_tab_record_once_with_fake_service_populates_utterances(qapp, tmp_path: Path):
+    from ai_agent.core.voice.service import VoiceService
+    from test_voice_service import FakeCapture, FakeSTT
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    fake_voice = VoiceService(
+        store=window.agent.skill_context.voice.store,
+        audio_capture_factory=lambda: FakeCapture([b"chunk"]),
+        stt_factory=lambda: FakeSTT(["Обсудили бюджет квартала"]),
+    )
+    fake_voice.create_task(title="Бюджет", description="Финансовый план квартала")
+    window.agent.skill_context.voice = fake_voice
+    window._refresh_tasks_and_utterances()
+
+    window.mic_enabled_checkbox.setChecked(True)
+    window._on_record_once()
+    _wait_for_voice_idle(window, qapp)
+
+    assert window.utterances_list.count() == 1
+    assert "Обсудили бюджет квартала" in window.utterances_list.item(0).text()
+    assert "задача #" in window.utterances_list.item(0).text()
+
+
+def test_voice_tab_confirm_utterance_updates_assignment(qapp, tmp_path: Path):
+    from ai_agent.core.voice.service import VoiceService
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    fake_voice = VoiceService(store=window.agent.skill_context.voice.store)
+    task = fake_voice.create_task(title="Проект Альфа")
+    recording = fake_voice.store.start_recording(mode="once")
+    utterance = fake_voice.store.add_utterance(recording.id, "Реплика без явной привязки")
+    window.agent.skill_context.voice = fake_voice
+    window._refresh_tasks_and_utterances()
+
+    assert "не отнесено" in window.utterances_list.item(0).text()
+
+    window.utterances_list.setCurrentRow(0)
+    window.confirm_task_combo.setCurrentIndex(0)
+    window._on_confirm_utterance(True)
+    _wait_for_voice_idle(window, qapp)
+
+    assert f"задача #{task.id}" in window.utterances_list.item(0).text()
+    assert fake_voice.store.get_utterance(utterance.id).task_id == task.id
+
+
+def test_voice_tab_continuous_denied_without_policy(qapp, tmp_path: Path):
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    window._on_toggle_continuous()
+    _wait_for_voice_idle(window, qapp)
+
+    assert "Ошибка" in window.voice_status_label.text()
+    assert window.continuous_status_label.text() == "Постоянная запись выключена."
+
+
+def test_voice_tab_continuous_start_stop_round_trip(qapp, tmp_path: Path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from ai_agent.core.voice.service import VoiceService
+    from test_voice_service import FakeContinuousCapture, FakeSTT
+
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    fake_voice = VoiceService(
+        store=window.agent.skill_context.voice.store,
+        audio_capture_factory=lambda: FakeContinuousCapture([]),
+        stt_factory=lambda: FakeSTT([]),
+    )
+    window.agent.skill_context.voice = fake_voice
+    window.mic_continuous_checkbox.setChecked(True)
+    window.agent.skill_context.policy.config.microphone_continuous_enabled = True
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes))
+
+    window._on_toggle_continuous()
+    _wait_for_voice_idle(window, qapp)
+    assert fake_voice.is_continuous_active is True
+    assert "🔴" in window.continuous_status_label.text()
+
+    window._on_toggle_continuous()
+    _wait_for_voice_idle(window, qapp)
+    assert fake_voice.is_continuous_active is False
+    assert window.continuous_status_label.text() == "Постоянная запись выключена."
+
+
+def test_voice_tab_reminder_check_appends_chat_message(qapp, tmp_path: Path):
+    window = _make_window(tmp_path)
+    _wait_for_models_idle(window, qapp)
+
+    voice = window.agent.skill_context.voice
+    task = voice.create_task(title="Бюджет")
+    voice.store.add_reminder(task_id=task.id, fire_at=0.0, message="Срок сегодня")
+
+    window._on_check_reminders()
+
+    assert "Срок сегодня" in window.chat_log.toPlainText()
+    assert "Бюджет" in window.chat_log.toPlainText()

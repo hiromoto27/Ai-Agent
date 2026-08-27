@@ -24,6 +24,8 @@ from ai_agent.core.policy import PolicyConfig, PolicyEngine
 from ai_agent.core.policy.engine import ConfirmCallback, always_deny
 from ai_agent.core.skills import build_default_registry
 from ai_agent.core.skills.base import SkillContext
+from ai_agent.core.voice.service import VoiceService
+from ai_agent.core.voice.store import VoiceStore
 
 logger = get_logger("app")
 
@@ -53,6 +55,7 @@ def ensure_state_dirs(state_dir: Path, workspace_root: Path) -> None:
     workspace_root.mkdir(parents=True, exist_ok=True)
     (workspace_root / "documents").mkdir(exist_ok=True)
     (workspace_root / "scripts").mkdir(exist_ok=True)
+    (workspace_root / "recordings").mkdir(exist_ok=True)
 
     models_dir = workspace_root / "models"
     models_dir.mkdir(exist_ok=True)
@@ -188,8 +191,17 @@ def build_agent(
         confirm_callback=confirm_callback or always_deny,
         audit_log_path=state_dir / "audit.jsonl",
     )
-    skill_context = SkillContext(workspace_root=workspace_root, policy=policy, profile=profile)
     memory = MemoryStore(state_dir / "memory.sqlite3")
+    # Тот же файл БД, что и MemoryStore — свои таблицы (voice_*), отдельное
+    # соединение (см. VoiceStore); voice.py-навыки читают текущее значение
+    # microphone.retain_audio из policy "на лету", а не на момент сборки.
+    voice_store = VoiceStore(state_dir / "memory.sqlite3")
+    voice_service = VoiceService(
+        store=voice_store,
+        audio_dir=workspace_root / "recordings",
+        retain_audio=lambda: policy.config.microphone_retain_audio,
+    )
+    skill_context = SkillContext(workspace_root=workspace_root, policy=policy, profile=profile, voice=voice_service)
     registry = build_default_registry()
 
     llm_settings_path = state_dir / "llm_settings.yaml"

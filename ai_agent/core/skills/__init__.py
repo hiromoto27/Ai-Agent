@@ -5,6 +5,7 @@ from .models import register_model_skills
 from .package_manager import register_package_skills
 from .scripting import register_scripting_skills
 from .system import register_system_skills
+from .voice import register_voice_skills
 from .web import register_web_skills
 
 
@@ -21,6 +22,7 @@ def build_default_registry(search_endpoint: str | None = None) -> SkillRegistry:
         register_web_skills(registry)
     register_package_skills(registry)
     register_model_skills(registry)
+    register_voice_skills(registry)
     return registry
 
 
