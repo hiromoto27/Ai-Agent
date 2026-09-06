@@ -17,6 +17,11 @@ hf = ["huggingface_hub>=0.24"]
 # ставится сборкой из исходников (нужен компилятор C++/CMake). Пользователь
 # ставит его явно, если хочет запускать локальные GGUF-модели.
 local-llm = ["llama-cpp-python>=0.3"]
+# Модуль «Диктофон» (запись с микрофона, локальное распознавание речи).
+# Не входит в "all": faster-whisper тянет за собой ctranslate2 (~сотни МБ) —
+# это отдельная, необязательная для базового агента функция, а не что-то
+# нужное каждому. Ставится явно: pip install "ai-agent[voice]".
+voice = ["sounddevice>=0.4", "webrtcvad>=2.0.10", "faster-whisper>=1.0"]
 gui = ["PySide6-Essentials>=6.7"]
 dev = ["pytest>=8.0", "pytest-cov>=5.0"]
 all = ["ai-agent[llm,docs,web,hf,gui,dev]"]

@@ -11,11 +11,14 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ai_agent.core.autotune import Profile, build_profile, detect_hardware
 from ai_agent.core.logging_setup import get_logger
 from ai_agent.core.policy import PermissionDenied, PolicyEngine
+
+if TYPE_CHECKING:
+    from ai_agent.core.voice.service import VoiceService
 
 logger = get_logger("skills")
 
@@ -83,6 +86,10 @@ class SkillContext:
     workspace_root: Path
     policy: PolicyEngine
     profile: Profile = field(default_factory=lambda: build_profile(detect_hardware()))
+    # Опционально: сервис диктофона (см. ai_agent/core/voice). None, если не
+    # собран (например, приложению это не нужно) — навыки voice.*/tasks.*
+    # тогда возвращают понятную ошибку вместо падения агента.
+    voice: Optional["VoiceService"] = None
 
     def resolve_path(self, path_str: str, subdir: Optional[str] = None) -> Path:
         """Разрешает путь: абсолютный — как есть, относительный — от workspace

@@ -27,6 +27,7 @@ TAB_TITLES = {
     "memory": "🧠  Память",
     "permissions": "🔒  Права доступа",
     "models": "🤗  Модели",
+    "voice": "🎙  Диктофон",
 }
 
 STYLESHEET = f"""
@@ -163,6 +164,39 @@ QCheckBox::indicator:checked {{
     border: 1px solid {ACCENT};
 }}
 
+QGroupBox {{
+    background-color: {BG_PANEL};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+    margin-top: 16px;
+    padding: 16px 12px 12px 12px;
+    font-weight: 600;
+}}
+
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 14px;
+    top: 2px;
+    padding: 0 6px;
+    color: {TEXT};
+    background-color: {BG_PANEL};
+}}
+
+QProgressBar {{
+    background-color: {BG_INPUT};
+    border: 1px solid {BORDER};
+    border-radius: 7px;
+    text-align: center;
+    color: {TEXT_DIM};
+    height: 14px;
+}}
+
+QProgressBar::chunk {{
+    background-color: {ACCENT};
+    border-radius: 6px;
+}}
+
 QLabel#hwSummary {{
     background-color: {BG_PANEL};
     border: 1px solid {BORDER};
@@ -191,6 +225,16 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
     height: 0px;
 }}
 """
+
+
+def level_meter_color(level: float) -> str:
+    """Цвет полосы индикатора уровня сигнала микрофона: зелёный — нормально,
+    жёлтый — громко, красный — вероятное клиппирование (0.0..1.0)."""
+    if level >= 0.9:
+        return ERROR_COLOR
+    if level >= 0.6:
+        return "#e0c341"
+    return OK_COLOR
 
 
 def _bubble(text: str, *, align: str, bg: str, label: str = "") -> str:

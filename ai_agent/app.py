@@ -24,6 +24,10 @@ from ai_agent.core.policy import PolicyConfig, PolicyEngine
 from ai_agent.core.policy.engine import ConfirmCallback, always_deny
 from ai_agent.core.skills import build_default_registry
 from ai_agent.core.skills.base import SkillContext
+from ai_agent.core.voice.service import VoiceService
+from ai_agent.core.voice.stt import create_stt_engine
+from ai_agent.core.voice.store import VoiceStore
+from ai_agent.core.voice_settings import VoiceSettings
 
 logger = get_logger("app")
 
@@ -53,6 +57,7 @@ def ensure_state_dirs(state_dir: Path, workspace_root: Path) -> None:
     workspace_root.mkdir(parents=True, exist_ok=True)
     (workspace_root / "documents").mkdir(exist_ok=True)
     (workspace_root / "scripts").mkdir(exist_ok=True)
+    (workspace_root / "recordings").mkdir(exist_ok=True)
 
     models_dir = workspace_root / "models"
     models_dir.mkdir(exist_ok=True)
@@ -188,8 +193,25 @@ def build_agent(
         confirm_callback=confirm_callback or always_deny,
         audit_log_path=state_dir / "audit.jsonl",
     )
-    skill_context = SkillContext(workspace_root=workspace_root, policy=policy, profile=profile)
     memory = MemoryStore(state_dir / "memory.sqlite3")
+    # Тот же файл БД, что и MemoryStore — свои таблицы (voice_*), отдельное
+    # соединение (см. VoiceStore); voice.py-навыки читают текущее значение
+    # microphone.retain_audio из policy "на лету", а не на момент сборки.
+    voice_store = VoiceStore(state_dir / "memory.sqlite3")
+    voice_settings_path = state_dir / "voice_settings.yaml"
+    voice_settings = VoiceSettings.load(voice_settings_path)
+    voice_service = VoiceService(
+        store=voice_store,
+        audio_dir=workspace_root / "recordings",
+        retain_audio=lambda: policy.config.microphone_retain_audio,
+        input_device=voice_settings.input_device,
+        # Замыкание на voice_settings, а не на значение — voice.download_stt_model
+        # меняет stt_model_size и вызывает preload_stt() напрямую, но при
+        # перезапуске приложения (без явной предзагрузки) размер модели
+        # всё равно берётся из сохранённых настроек, а не всегда "base".
+        stt_factory=lambda: create_stt_engine(model_size=voice_settings.stt_model_size or "base"),
+    )
+    skill_context = SkillContext(workspace_root=workspace_root, policy=policy, profile=profile, voice=voice_service)
     registry = build_default_registry()
 
     llm_settings_path = state_dir / "llm_settings.yaml"
@@ -212,6 +234,8 @@ def build_agent(
     agent.llm_settings_path = llm_settings_path
     agent.llm_setup_error = setup_error
     agent.log_path = log_path
+    agent.voice_settings = voice_settings
+    agent.voice_settings_path = voice_settings_path
 
     spawn_subagent_skill = registry.get("agents.spawn_subagent")
     spawn_subagent_skill.configure(agent, default_max_steps=max(2, profile.max_agent_steps // 2))
