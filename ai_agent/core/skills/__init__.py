@@ -1,4 +1,5 @@
 from .base import Skill, SkillContext, SkillParam, SkillResult, SkillSpec, SkillRegistry
+from .agents import register_agent_skills
 from .documents import register_document_skills
 from .files import register_file_skills
 from .models import register_model_skills
@@ -22,6 +23,7 @@ def build_default_registry(search_endpoint: str | None = None) -> SkillRegistry:
         register_web_skills(registry)
     register_package_skills(registry)
     register_model_skills(registry)
+    register_agent_skills(registry)
     register_voice_skills(registry)
     return registry
 

@@ -110,6 +110,8 @@ def test_skills_tab_lists_builtin_skills(qapp, tmp_path: Path):
     assert "models.recommend" in text
     assert "models.search_huggingface" in text
     assert "models.download_huggingface" in text
+    assert "agents.spawn_subagent" in text
+    assert "skills.estimate_package_size" in text
 
 
 def test_send_plain_task_updates_chat_and_memory(qapp, tmp_path: Path):

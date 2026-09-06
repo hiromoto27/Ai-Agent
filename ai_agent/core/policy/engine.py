@@ -58,6 +58,7 @@ class PolicyConfig:
     network_deny_domains: list[str] = field(default_factory=list)
     package_install_enabled: bool = False
     model_download_enabled: bool = False
+    subagents_enabled: bool = True
     # Разовая запись — как остальные навыки: включил здесь один раз, дальше
     # работает без переспроса. Постоянная (фоновая) запись — отдельный, более
     # строгий флаг: подтверждение запрашивается при КАЖДОМ включении режима
@@ -92,6 +93,7 @@ class PolicyConfig:
         network = raw.get("network", {})
         package_install = raw.get("package_install", {})
         model_download = raw.get("model_download", {})
+        agents = raw.get("agents", {})
         microphone = raw.get("microphone", {})
         return cls(
             workspace_only=raw.get("workspace_only", True),
@@ -107,6 +109,7 @@ class PolicyConfig:
             network_deny_domains=network.get("deny_domains", []),
             package_install_enabled=package_install.get("enabled", False),
             model_download_enabled=model_download.get("enabled", False),
+            subagents_enabled=agents.get("enabled", True),
             microphone_enabled=microphone.get("enabled", False),
             microphone_continuous_enabled=microphone.get("continuous_enabled", False),
             microphone_retain_audio=microphone.get("retain_audio", False),
@@ -141,6 +144,7 @@ class PolicyConfig:
             },
             "package_install": {"enabled": self.package_install_enabled},
             "model_download": {"enabled": self.model_download_enabled},
+            "agents": {"enabled": self.subagents_enabled},
             "microphone": {
                 "enabled": self.microphone_enabled,
                 "continuous_enabled": self.microphone_continuous_enabled,
@@ -275,6 +279,14 @@ class PolicyEngine:
         requires_confirmation = "model.download" in self.config.confirmation_required_for
         return PolicyDecision(True, requires_confirmation=requires_confirmation)
 
+    def check_agents_spawn(self) -> PolicyDecision:
+        if not self.config.subagents_enabled:
+            return PolicyDecision(
+                False, reason="создание вспомогательных агентов отключено (agents.enabled=false)"
+            )
+        requires_confirmation = "agents.spawn" in self.config.confirmation_required_for
+        return PolicyDecision(True, requires_confirmation=requires_confirmation)
+
     def check_microphone(self, continuous: bool) -> PolicyDecision:
         if continuous:
             if not self.config.microphone_continuous_enabled:
@@ -323,6 +335,8 @@ class PolicyEngine:
             return self.check_package_install(context.get("package", ""))
         if action == "model.download":
             return self.check_model_download()
+        if action == "agents.spawn":
+            return self.check_agents_spawn()
         if action == "mic.record":
             return self.check_microphone(continuous=False)
         if action == "mic.continuous_start":

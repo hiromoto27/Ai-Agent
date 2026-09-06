@@ -158,6 +158,26 @@ def test_model_download_enabled_requires_confirmation(tmp_path):
     engine.enforce("model.download", repo_id="Qwen/Qwen2.5-1.5B-Instruct-GGUF")
 
 
+def test_agents_spawn_enabled_by_default(tmp_path):
+    engine, _ = make_engine(tmp_path)
+    engine.enforce("agents.spawn")  # не должно бросить исключение
+
+
+def test_agents_spawn_denied_when_disabled(tmp_path):
+    engine, _ = make_engine(tmp_path, subagents_enabled=False)
+    with pytest.raises(PermissionDenied):
+        engine.enforce("agents.spawn")
+
+
+def test_agents_spawn_requires_confirmation_when_listed(tmp_path):
+    engine, _ = make_engine(tmp_path, confirmation_required_for=["agents.spawn"])
+    engine.confirm_callback = always_deny
+    with pytest.raises(PermissionDenied):
+        engine.enforce("agents.spawn")
+    engine.confirm_callback = always_allow
+    engine.enforce("agents.spawn")
+
+
 def test_audit_log_written(tmp_path):
     engine, workspace = make_engine(tmp_path)
     engine.enforce("files.write", path=workspace / "a.txt")
@@ -173,17 +193,20 @@ def test_config_load_and_save_roundtrip(tmp_path):
     config = PolicyConfig.default()
     config.shell_enabled = True
     config.network_allow_domains = ["example.com"]
+    config.subagents_enabled = False
     config.save(path)
 
     loaded = PolicyConfig.load(path)
     assert loaded.shell_enabled is True
     assert loaded.network_allow_domains == ["example.com"]
+    assert loaded.subagents_enabled is False
 
 
 def test_config_load_missing_file_returns_default(tmp_path):
     config = PolicyConfig.load(tmp_path / "does-not-exist.yaml")
     assert config.shell_enabled is False
     assert config.workspace_only is True
+    assert config.subagents_enabled is True
 
 
 def test_microphone_record_disabled_by_default(tmp_path):
