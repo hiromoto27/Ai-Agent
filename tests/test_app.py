@@ -188,3 +188,10 @@ def test_build_agent_combines_custom_system_prompt(tmp_path: Path):
 
     assert agent.system_prompt.startswith(DEFAULT_SYSTEM_PROMPT)
     assert "Отвечай только эмодзи." in agent.system_prompt
+
+
+def test_build_agent_wires_spawn_subagent_skill(tmp_path: Path):
+    agent = app.build_agent(state_dir=tmp_path / "state", workspace_root=tmp_path / "ws")
+
+    spawn_skill = agent.skills.get("agents.spawn_subagent")
+    assert spawn_skill._agent is agent

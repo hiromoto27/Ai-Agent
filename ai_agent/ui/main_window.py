@@ -279,6 +279,7 @@ class MainWindow(QMainWindow):
             f"scripting.execute_enabled: {config.scripting_execute_enabled}\n"
             f"package_install.enabled: {config.package_install_enabled}\n"
             f"model_download.enabled: {config.model_download_enabled}\n"
+            f"agents.enabled: {config.subagents_enabled}\n"
             f"workspace_only: {config.workspace_only}\n"
             f"network.enabled: {config.network_enabled}\n\n"
             f"Файл: {self._policy_path}\n"

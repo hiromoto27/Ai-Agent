@@ -213,6 +213,9 @@ def build_agent(
     agent.llm_setup_error = setup_error
     agent.log_path = log_path
 
+    spawn_subagent_skill = registry.get("agents.spawn_subagent")
+    spawn_subagent_skill.configure(agent, default_max_steps=max(2, profile.max_agent_steps // 2))
+
     logger.info("Агент собран: provider=%s -> %s", llm_settings.provider, type(llm).__name__)
     if setup_error:
         logger.warning("Выбранный провайдер не запустился, откат на EchoProvider: %s", setup_error)
